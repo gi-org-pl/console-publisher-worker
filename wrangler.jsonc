@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "console-buffer",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-09-28",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "console.gi.org.pl/api/buffer/*", "zone_name": "gi.org.pl" },
+    { "pattern": "console.gi.org.pl/buffer-media/*", "zone_name": "gi.org.pl" }
+  ],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "console-buffer-media" }],
+  "vars": {
+    "APP_ORIGIN": "https://console.gi.org.pl",
+    "ACCESS_TEAM_DOMAIN": "https://YOUR-TEAM.cloudflareaccess.com",
+    "ACCESS_AUD": "REPLACE_WITH_ACCESS_APPLICATION_AUD",
+    "CHANNELS_JSON": "[]"
+  }
+}

@@ -9,11 +9,11 @@
     { "pattern": "console.gi.org.pl/api/buffer/*", "zone_name": "gi.org.pl" },
     { "pattern": "console.gi.org.pl/buffer-media/*", "zone_name": "gi.org.pl" }
   ],
-  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "console-buffer-media" }],
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "console-publisher-worker" }],
   "vars": {
     "APP_ORIGIN": "https://console.gi.org.pl",
-    "ACCESS_TEAM_DOMAIN": "https://YOUR-TEAM.cloudflareaccess.com",
-    "ACCESS_AUD": "REPLACE_WITH_ACCESS_APPLICATION_AUD",
+    "ACCESS_TEAM_DOMAIN": "https://generacja-innowacja.cloudflareaccess.com",
+    "ACCESS_AUD": "d8f485cd8ccc3d67d97632e7db40bc2c4a72dc4fe059f36d1f796d11478f162d",
     "CHANNELS_JSON": "[]"
   }
 }

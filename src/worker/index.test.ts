@@ -316,6 +316,15 @@ describe("Given the publishing Worker", () => {
       metadata: { instagram: { type: "post", shouldShareToFeed: true } },
     });
   });
+  it("sends the post type Buffer requires for Facebook", async () => {
+    env.CHANNELS_JSON = JSON.stringify([
+      { id: "allowed", name: "Facebook", service: "facebook" },
+    ]);
+    expect((await send()).status).toBe(200);
+    expect(
+      JSON.parse(post.mock.calls[0][1].body).variables.input.metadata,
+    ).toEqual({ facebook: { type: "post" } });
+  });
   it("supports immediate and scheduled delivery without Instagram metadata on other channels", async () => {
     env.CHANNELS_JSON = JSON.stringify([
       { id: "allowed", name: "LinkedIn", service: "linkedin" },

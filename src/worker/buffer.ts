@@ -9,6 +9,18 @@ const mutation = `mutation CreatePost($input: CreatePostInput!) {
   }
 }`;
 
+/** Networks where Buffer rejects a post that has no channel-specific type. */
+function channelMetadata(channel: Channel): object | undefined {
+  switch (channel.service) {
+    case "instagram":
+      return { instagram: { type: "post", shouldShareToFeed: true } };
+    case "facebook":
+      return { facebook: { type: "post" } };
+    default:
+      return undefined;
+  }
+}
+
 /** Send one mutation. Callers must reserve its request ID before invoking this. */
 export async function createBufferPost(
   env: Env,
@@ -16,6 +28,7 @@ export async function createBufferPost(
   channel: Channel,
 ): Promise<string> {
   const imageUrl = mediaUrl(env, input.mediaId);
+  const metadata = channelMetadata(channel);
   const response = await fetch("https://api.buffer.com", {
     method: "POST",
     headers: {
@@ -35,13 +48,7 @@ export async function createBufferPost(
           needsApproval: false,
           saveToDraft: false,
           assets: [{ image: { url: imageUrl } }],
-          ...(channel.service === "instagram"
-            ? {
-                metadata: {
-                  instagram: { type: "post", shouldShareToFeed: true },
-                },
-              }
-            : {}),
+          ...(metadata ? { metadata } : {}),
         },
       },
     }),

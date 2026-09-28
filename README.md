@@ -34,7 +34,7 @@ The Buffer key exists only as a Worker secret. The `CHANNELS_JSON` setting is a 
    }
    ```
 
-4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram feed posts; Stories, Reels, videos, carousels, and platform-specific metadata are not implemented.
+4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram and Facebook feed posts (Buffer requires a post type for both); Stories, Reels, videos, carousels, and other platform-specific metadata are not implemented.
 
 Buffer Free has limits on channels, queued posts, API calls, and seats; verify the [current plan limits](https://buffer.com/pricing) before expanding use. This design uses one designated operator and one Buffer account/API key. Access identities do not become separate Buffer users.
 

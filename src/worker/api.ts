@@ -19,7 +19,7 @@ interface Endpoint {
 function finishLogin({ url, env }: ApiContext): Response {
   const state = url.searchParams.get("state");
   if (!state || !/^[0-9a-f-]{36}$/.test(state)) {
-    return error("Nieprawidłowy identyfikator logowania.", 400);
+    return error("Invalid login identifier.", 400);
   }
 
   return Response.redirect(`${env.APP_ORIGIN}/buffer-auth#${state}`, 302);

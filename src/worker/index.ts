@@ -13,7 +13,10 @@ export default {
       logError("request-failed", cause, {
         path: new URL(request.url).pathname,
       });
-      return error("Usługa publikacji jest niedostępna. Spróbuj później.", 503);
+      return error(
+        "The publishing service is unavailable. Try again later.",
+        503,
+      );
     }
   },
 };

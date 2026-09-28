@@ -11,7 +11,7 @@ export async function routeRequest(
 ): Promise<Response> {
   const url = new URL(request.url);
   if (url.origin !== env.APP_ORIGIN) {
-    return error("Nieprawidłowy adres usługi.", 403);
+    return error("Invalid service address.", 403);
   }
 
   // Buffer fetches PNGs without an Access cookie. No other resource is public.
@@ -22,7 +22,7 @@ export async function routeRequest(
 
   const endpoint = endpoints[url.pathname];
   if (!endpoint) {
-    return error("Nie znaleziono endpointu.", 404);
+    return error("Endpoint not found.", 404);
   }
 
   let operator: Operator;
@@ -34,19 +34,19 @@ export async function routeRequest(
     );
   } catch (cause) {
     logError("access-denied", cause, { path: url.pathname });
-    return error("Zaloguj się przez Cloudflare Access.", 401);
+    return error("Sign in via Cloudflare Access.", 401);
   }
 
   if (request.method !== endpoint.method) {
-    return error("Niedozwolona metoda.", 405);
+    return error("Method not allowed.", 405);
   }
 
   if (endpoint.method === "POST") {
     if (request.headers.get("Origin") !== env.APP_ORIGIN) {
-      return error("Niedozwolone źródło żądania.", 403);
+      return error("Request origin not allowed.", 403);
     }
     if (!env.BUFFER_API_KEY) {
-      return error("Publikacja nie jest jeszcze skonfigurowana.", 503);
+      return error("Publishing is not configured yet.", 503);
     }
   }
 

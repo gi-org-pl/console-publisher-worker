@@ -45,7 +45,7 @@ async function parseInput(request: Request): Promise<PublishInput | Response> {
   if (
     request.headers.get("Content-Type")?.split(";")[0] !== "application/json"
   ) {
-    return error("Wymagany JSON.", 415);
+    return error("JSON required.", 415);
   }
 
   try {
@@ -55,13 +55,13 @@ async function parseInput(request: Request): Promise<PublishInput | Response> {
     );
   } catch (cause) {
     logError("post-input-rejected", cause);
-    return error("Sprawdź treść i ustawienia posta.", 400);
+    return error("Check the post text and settings.", 400);
   }
 }
 
 function scheduleError(input: PublishInput): Response | undefined {
   if (input.mode !== "customScheduled") {
-    return input.dueAt ? error("Nieprawidłowy termin.", 400) : undefined;
+    return input.dueAt ? error("Invalid schedule time.", 400) : undefined;
   }
 
   const dueAt = Date.parse(input.dueAt ?? "");
@@ -72,7 +72,7 @@ function scheduleError(input: PublishInput): Response | undefined {
     dueAt > now + MAX_SCHEDULE_DAYS * DAY_MS
   ) {
     return error(
-      `Wybierz termin od minuty do ${MAX_SCHEDULE_DAYS} dni w przyszłości.`,
+      `Choose a time from one minute to ${MAX_SCHEDULE_DAYS} days from now.`,
       400,
     );
   }
@@ -103,7 +103,7 @@ async function reserveRequest(
   }
 
   return error(
-    "Żądanie było już wysłane. Sprawdź Buffer przed utworzeniem kolejnego posta.",
+    "This request was already sent. Check Buffer before creating another post.",
     409,
   );
 }
@@ -121,7 +121,7 @@ export async function createPost(
 
   const channel = channels.find((entry) => entry.id === input.channelId);
   if (!channel) {
-    return error("Ten kanał nie jest dozwolony.", 403);
+    return error("This channel is not allowed.", 403);
   }
 
   const schedule = scheduleError(input);
@@ -131,7 +131,7 @@ export async function createPost(
 
   const media = await env.MEDIA.head(imageKey(input.mediaId));
   if (!media || media.customMetadata?.owner !== operator.subject) {
-    return error("Grafika wygasła lub należy do innego użytkownika.", 403);
+    return error("The image expired or belongs to another operator.", 403);
   }
 
   const replay = await reserveRequest(env, operator, input);
@@ -147,7 +147,7 @@ export async function createPost(
     // A timeout can occur after Buffer accepted the mutation. Never auto-retry.
     logError("buffer-post-unconfirmed", cause, context);
     return error(
-      "Buffer nie potwierdził utworzenia posta. Sprawdź kolejkę i historię w Buffer przed ponowną publikacją.",
+      "Buffer did not confirm the post. Check the Buffer queue and history before publishing again.",
       502,
     );
   }

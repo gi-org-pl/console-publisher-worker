@@ -28,11 +28,11 @@ export async function serveMedia(
   mediaId: string,
 ): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") {
-    return error("Niedozwolona metoda.", 405);
+    return error("Method not allowed.", 405);
   }
   const object = await env.MEDIA.get(imageKey(mediaId));
   if (!object) {
-    return error("Nie znaleziono grafiki.", 404);
+    return error("Image not found.", 404);
   }
   return new Response(
     request.method === "HEAD" ? null : (object.body as ReadableStream),
@@ -73,7 +73,7 @@ export async function uploadMedia(
   operator: Operator,
 ): Promise<Response> {
   if (request.headers.get("Content-Type") !== "image/png") {
-    return error("Wybierz grafikę PNG.", 415);
+    return error("Choose a PNG image.", 415);
   }
 
   let bytes: Uint8Array;
@@ -82,14 +82,14 @@ export async function uploadMedia(
   } catch (cause) {
     if (cause instanceof BodyTooLargeError) {
       const maxMb = MAX_IMAGE_BYTES / 1024 / 1024;
-      return error(`Grafika musi mieć maksymalnie ${maxMb} MB.`, 413);
+      return error(`The image must be at most ${maxMb} MB.`, 413);
     }
-    return error("Nie przesłano grafiki.", 400);
+    return error("No image was uploaded.", 400);
   }
 
   if (!validPng(bytes)) {
     return error(
-      `Nieprawidłowy plik PNG (wymiary 1–${MAX_IMAGE_DIMENSION} px).`,
+      `Invalid PNG file (dimensions must be 1-${MAX_IMAGE_DIMENSION} px).`,
       400,
     );
   }

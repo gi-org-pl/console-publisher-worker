@@ -18,6 +18,15 @@ export const channelSchema = z.object({
   ]),
 });
 export const channelsSchema = z.array(channelSchema).min(1);
+/** The Client ID of a Cloudflare Access service token, as it appears in `common_name`. */
+export const SERVICE_CLIENT_ID = /^[0-9a-f]{32}\.access$/;
+export const serviceSchema = z
+  .object({
+    clientId: z.string().regex(SERVICE_CLIENT_ID),
+    name: z.string().regex(/^[a-z0-9-]{1,40}$/),
+  })
+  .strict();
+export const servicesSchema = z.array(serviceSchema);
 export const sessionSchema = z.object({
   email: z.email(),
   channels: channelsSchema,

@@ -16,7 +16,17 @@ interface Endpoint {
   handle: (context: ApiContext) => Promise<Response> | Response;
 }
 
-function finishLogin({ url, env }: ApiContext): Response {
+function sessionIdentity(operator: Operator) {
+  return operator.kind === "user"
+    ? { email: operator.email }
+    : { service: operator.name };
+}
+
+function finishLogin({ url, env, operator }: ApiContext): Response {
+  if (operator.kind !== "user") {
+    return error("Browser login is for operators only.", 403);
+  }
+
   const state = url.searchParams.get("state");
   if (!state || !/^[0-9a-f-]{36}$/.test(state)) {
     return error("Invalid login identifier.", 400);
@@ -33,7 +43,7 @@ export const endpoints: Record<string, Endpoint> = {
   "/api/buffer/session": {
     method: "GET",
     handle: ({ env, operator }) =>
-      json({ email: operator.email, channels: loadChannels(env) }),
+      json({ ...sessionIdentity(operator), channels: loadChannels(env) }),
   },
   "/api/buffer/media": {
     method: "POST",

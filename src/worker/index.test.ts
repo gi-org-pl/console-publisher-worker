@@ -25,8 +25,16 @@ const input = {
   text: "Hello",
   mode: "addToQueue",
 };
+const clientId = "e367826f93b8d71185e03fe518aff3b4.access";
+const serviceOwner = `service:${clientId}`;
+const user = {
+  kind: "user",
+  email: "operator@example.org",
+  subject: "user1",
+};
 let env: Env;
 let errorLog: MockInstance<typeof console.error>;
+let infoLog: MockInstance<typeof console.info>;
 let failReceiptWrite: boolean;
 let objects: Map<
   string,
@@ -46,6 +54,28 @@ function request(
 }
 async function send(body: unknown = input) {
   return worker.fetch(request("/api/buffer/posts", body), env);
+}
+/** A non-browser client: no Origin header unless one is given. */
+function serviceRequest(
+  path: string,
+  body?: unknown,
+  headers: Record<string, string> = {},
+) {
+  return new Request(`${origin}${path}`, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+async function sendAsService(body: unknown = input) {
+  return worker.fetch(serviceRequest("/api/buffer/posts", body), env);
+}
+function asService() {
+  authenticate.mockResolvedValue({ kind: "service", clientId });
+  objects.set(`images/${mediaId}`, {
+    value: png(),
+    customMetadata: { owner: serviceOwner },
+  });
 }
 function png() {
   const data = new Uint8Array(24);
@@ -67,13 +97,10 @@ function upload(body: Uint8Array = png(), contentType = "image/png") {
 }
 beforeEach(() => {
   vi.resetAllMocks();
-  vi.spyOn(console, "info").mockImplementation(() => {});
+  infoLog = vi.spyOn(console, "info").mockImplementation(() => {});
   errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
   failReceiptWrite = false;
-  authenticate.mockResolvedValue({
-    email: "operator@example.org",
-    subject: "user1",
-  });
+  authenticate.mockResolvedValue(user);
   post.mockImplementation(async () =>
     Response.json({ data: { createPost: { post: { id: "post1" } } } }),
   );
@@ -89,6 +116,7 @@ beforeEach(() => {
     CHANNELS_JSON: JSON.stringify([
       { id: "allowed", name: "Our Instagram", service: "instagram" },
     ]),
+    SERVICES_JSON: JSON.stringify([{ clientId, name: "gieniek-bot" }]),
     MEDIA: {
       head: vi.fn(async (key: string) => objects.get(key) ?? null),
       get: vi.fn(async (key: string) => {
@@ -287,6 +315,7 @@ describe("Given the publishing Worker", () => {
   });
   it("rejects images owned by another operator", async () => {
     authenticate.mockResolvedValue({
+      kind: "user",
       subject: "user2",
       email: "other@example.org",
     });
@@ -304,6 +333,9 @@ describe("Given the publishing Worker", () => {
   });
   it("creates a post using server-owned credentials, URL and Instagram metadata", async () => {
     expect(await (await send()).json()).toEqual({ postId: "post1" });
+    expect(infoLog).toHaveBeenCalledWith(
+      expect.stringContaining('"actor":"user","email":"operator@example.org"'),
+    );
     const [endpoint, options] = post.mock.calls[0];
     const body = JSON.parse(options.body);
     expect(endpoint).toBe("https://api.buffer.com");
@@ -397,5 +429,145 @@ describe("Given the publishing Worker", () => {
     expect(errorLog).toHaveBeenCalledWith(
       expect.stringContaining('"action":"receipt-write-failed"'),
     );
+  });
+});
+
+describe("Given a Cloudflare Access service token", () => {
+  beforeEach(asService);
+
+  it("identifies an allowlisted service in its session", async () => {
+    const response = await worker.fetch(
+      serviceRequest("/api/buffer/session"),
+      env,
+    );
+    expect(await response.json()).toEqual({
+      service: "gieniek-bot",
+      channels: JSON.parse(env.CHANNELS_JSON),
+    });
+  });
+  it.each([
+    JSON.stringify([
+      { clientId: clientId.replace("e3", "aa"), name: "other-bot" },
+    ]),
+    "[]",
+    "",
+    undefined,
+  ])("rejects a service token that is not on the allowlist: %j", async (services) => {
+    env.SERVICES_JSON = services;
+    for (const response of [
+      await worker.fetch(serviceRequest("/api/buffer/session"), env),
+      await sendAsService(),
+    ]) {
+      expect(response.status).toBe(403);
+    }
+    expect(post).not.toHaveBeenCalled();
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `"action":"service-denied","path":"/api/buffer/session","kind":"service","clientId":"${clientId}"`,
+      ),
+    );
+  });
+  it.each([
+    "invalid",
+    JSON.stringify([{ clientId: "gieniek-bot", name: "gieniek-bot" }]),
+    JSON.stringify([{ clientId, name: "Gieniek Bot" }]),
+    JSON.stringify([{ clientId, name: "gieniek-bot", admin: true }]),
+  ])("fails closed for services on an invalid allowlist without locking the operator out: %j", async (services) => {
+    env.SERVICES_JSON = services;
+    expect((await sendAsService()).status).toBe(503);
+    expect(post).not.toHaveBeenCalled();
+
+    authenticate.mockResolvedValue(user);
+    expect(
+      (await worker.fetch(request("/api/buffer/session"), env)).status,
+    ).toBe(200);
+  });
+  it("does not offer the browser login redirect to a service", async () => {
+    expect(
+      (
+        await worker.fetch(
+          serviceRequest(`/api/buffer/login?state=${crypto.randomUUID()}`),
+          env,
+        )
+      ).status,
+    ).toBe(403);
+  });
+  it("accepts writes without an Origin header but still rejects a foreign one", async () => {
+    expect((await sendAsService()).status).toBe(200);
+    expect(
+      (
+        await worker.fetch(
+          serviceRequest(
+            "/api/buffer/posts",
+            { ...input, requestId: crypto.randomUUID() },
+            { Origin: "https://evil.example" },
+          ),
+          env,
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await worker.fetch(
+          serviceRequest(
+            "/api/buffer/posts",
+            { ...input, requestId: crypto.randomUUID() },
+            { Origin: origin },
+          ),
+          env,
+        )
+      ).status,
+    ).toBe(200);
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+  it("keeps requiring the Console origin from an operator", async () => {
+    authenticate.mockResolvedValue(user);
+    objects.set(`images/${mediaId}`, {
+      value: png(),
+      customMetadata: { owner: "user1" },
+    });
+    expect((await sendAsService()).status).toBe(403);
+    expect(post).not.toHaveBeenCalled();
+  });
+  it("keeps service uploads and operator uploads apart", async () => {
+    const response = await worker.fetch(
+      new Request(`${origin}/api/buffer/media`, {
+        method: "POST",
+        body: png() as BodyInit,
+        headers: { "Content-Type": "image/png" },
+      }),
+      env,
+    );
+    const { mediaId: uploaded } = (await response.json()) as {
+      mediaId: string;
+    };
+    expect(objects.get(`images/${uploaded}`)?.customMetadata).toEqual({
+      owner: serviceOwner,
+    });
+
+    authenticate.mockResolvedValue(user);
+    expect((await send({ ...input, mediaId: uploaded })).status).toBe(403);
+
+    authenticate.mockResolvedValue({ kind: "service", clientId });
+    objects.set(`images/${mediaId}`, {
+      value: png(),
+      customMetadata: { owner: "user1" },
+    });
+    expect((await sendAsService()).status).toBe(403);
+    expect(post).not.toHaveBeenCalled();
+  });
+  it("logs a service call under the service name, not an email", async () => {
+    expect(await (await sendAsService()).json()).toEqual({ postId: "post1" });
+    const line = JSON.parse(infoLog.mock.calls[0][0]);
+    expect(line).toMatchObject({
+      action: "buffer-post-created",
+      actor: "service",
+      service: "gieniek-bot",
+      postId: "post1",
+    });
+    expect(line).not.toHaveProperty("email");
+    expect(
+      JSON.parse(String(objects.get(`receipts/${requestId}`)?.value)),
+    ).toMatchObject({ owner: serviceOwner, postId: "post1" });
   });
 });

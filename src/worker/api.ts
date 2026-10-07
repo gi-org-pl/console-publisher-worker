@@ -1,6 +1,7 @@
 import { loadChannels } from "./config";
 import { error, json } from "./http";
 import { uploadMedia } from "./media";
+import { allowedChannels } from "./policy";
 import { createPost } from "./posts";
 import type { Env, Operator } from "./types";
 
@@ -43,7 +44,10 @@ export const endpoints: Record<string, Endpoint> = {
   "/api/buffer/session": {
     method: "GET",
     handle: ({ env, operator }) =>
-      json({ ...sessionIdentity(operator), channels: loadChannels(env) }),
+      json({
+        ...sessionIdentity(operator),
+        channels: allowedChannels(operator, loadChannels(env)),
+      }),
   },
   "/api/buffer/media": {
     method: "POST",
@@ -52,6 +56,11 @@ export const endpoints: Record<string, Endpoint> = {
   "/api/buffer/posts": {
     method: "POST",
     handle: ({ request, env, operator }) =>
-      createPost(request, env, operator, loadChannels(env)),
+      createPost(
+        request,
+        env,
+        operator,
+        allowedChannels(operator, loadChannels(env)),
+      ),
   },
 };

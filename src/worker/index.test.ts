@@ -571,3 +571,180 @@ describe("Given a Cloudflare Access service token", () => {
     ).toMatchObject({ owner: serviceOwner, postId: "post1" });
   });
 });
+
+describe("Given the publishing restrictions for a service", () => {
+  const hour = 3_600_000;
+  const twoChannels = [
+    { id: "allowed", name: "Our Instagram", service: "instagram" },
+    { id: "second", name: "Our LinkedIn", service: "linkedin" },
+  ];
+  function scheduled(leadMs: number) {
+    return {
+      ...input,
+      requestId: crypto.randomUUID(),
+      mode: "customScheduled",
+      dueAt: new Date(Date.now() + leadMs).toISOString(),
+    };
+  }
+  function configure(service: Record<string, unknown>) {
+    env.SERVICES_JSON = JSON.stringify([
+      { clientId, name: "gieniek-bot", ...service },
+    ]);
+  }
+  function denials() {
+    return errorLog.mock.calls
+      .map(([line]) => JSON.parse(line))
+      .filter((line) => line.action === "service-post-denied");
+  }
+  beforeEach(asService);
+
+  it("refuses immediate publishing with 403 and leaves a trace", async () => {
+    const response = await sendAsService({ ...input, mode: "shareNow" });
+    expect(response.status).toBe(403);
+    expect(post).not.toHaveBeenCalled();
+    expect(objects.has(`receipts/${requestId}`)).toBe(false);
+    expect(denials()).toEqual([
+      {
+        action: "service-post-denied",
+        requestId,
+        channelId: "allowed",
+        mode: "shareNow",
+        actor: "service",
+        service: "gieniek-bot",
+        error: "Error: Mode not allowed for a service",
+      },
+    ]);
+  });
+  it("still lets a service use the queue", async () => {
+    expect((await sendAsService()).status).toBe(200);
+    expect(JSON.parse(post.mock.calls[0][1].body).variables.input.mode).toBe(
+      "addToQueue",
+    );
+    expect(denials()).toEqual([]);
+  });
+  it("requires two hours of lead time for a scheduled post by default", async () => {
+    const tooSoon = await sendAsService(scheduled(hour));
+    expect(tooSoon.status).toBe(400);
+    expect(await tooSoon.json()).toEqual({
+      message: "Choose a time from 120 minutes to 30 days from now.",
+    });
+    expect(post).not.toHaveBeenCalled();
+    expect(denials()).toMatchObject([
+      { mode: "customScheduled", error: "Error: Schedule time not allowed" },
+    ]);
+
+    expect((await sendAsService(scheduled(3 * hour))).status).toBe(200);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+  it("takes the lead time from the service's own configuration", async () => {
+    configure({ minScheduleLeadMinutes: 240 });
+    expect((await sendAsService(scheduled(3 * hour))).status).toBe(400);
+    expect((await sendAsService(scheduled(5 * hour))).status).toBe(200);
+
+    configure({ minScheduleLeadMinutes: 10 });
+    expect((await sendAsService(scheduled(hour))).status).toBe(200);
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+  it("limits a service to its own channel allowlist", async () => {
+    env.CHANNELS_JSON = JSON.stringify(twoChannels);
+    configure({ channelIds: ["second", "not-in-channels-json"] });
+
+    const session = await worker.fetch(
+      serviceRequest("/api/buffer/session"),
+      env,
+    );
+    expect(await session.json()).toEqual({
+      service: "gieniek-bot",
+      channels: [twoChannels[1]],
+    });
+
+    expect((await sendAsService()).status).toBe(403);
+    expect(
+      (await sendAsService({ ...input, channelId: "not-in-channels-json" }))
+        .status,
+    ).toBe(403);
+    expect(post).not.toHaveBeenCalled();
+    expect(denials()).toMatchObject([
+      { channelId: "allowed", error: "Error: Channel not allowed" },
+      { channelId: "not-in-channels-json" },
+    ]);
+
+    expect(
+      (
+        await sendAsService({
+          ...input,
+          requestId: crypto.randomUUID(),
+          channelId: "second",
+        })
+      ).status,
+    ).toBe(200);
+  });
+  it("gives a service every approved channel when it has no list of its own", async () => {
+    env.CHANNELS_JSON = JSON.stringify(twoChannels);
+    const session = await worker.fetch(
+      serviceRequest("/api/buffer/session"),
+      env,
+    );
+    expect(await session.json()).toMatchObject({ channels: twoChannels });
+    expect(
+      (await sendAsService({ ...input, channelId: "second" })).status,
+    ).toBe(200);
+  });
+  it.each([
+    { minScheduleLeadMinutes: 0 },
+    { minScheduleLeadMinutes: 1.5 },
+    { minScheduleLeadMinutes: 30 * 24 * 60 },
+    { minScheduleLeadMinutes: "120" },
+    { channelIds: [] },
+    { channelIds: [""] },
+    { modes: ["shareNow"] },
+  ])("fails closed on an invalid restriction: %j", async (service) => {
+    configure(service);
+    expect((await sendAsService()).status).toBe(503);
+    expect(post).not.toHaveBeenCalled();
+  });
+  it("records the service in the publication record and the log", async () => {
+    expect((await sendAsService()).status).toBe(200);
+    expect(
+      JSON.parse(String(objects.get(`receipts/${requestId}`)?.value)),
+    ).toMatchObject({
+      owner: serviceOwner,
+      service: "gieniek-bot",
+      postId: "post1",
+    });
+    expect(JSON.parse(infoLog.mock.calls[0][0])).toMatchObject({
+      action: "buffer-post-created",
+      actor: "service",
+      service: "gieniek-bot",
+      requestId,
+      channelId: "allowed",
+    });
+    expect(await (await sendAsService()).json()).toEqual({ postId: "post1" });
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+  it("does not apply any of the restrictions to an operator", async () => {
+    env.CHANNELS_JSON = JSON.stringify(twoChannels);
+    configure({ channelIds: ["second"], minScheduleLeadMinutes: 240 });
+    authenticate.mockResolvedValue(user);
+    objects.set(`images/${mediaId}`, {
+      value: png(),
+      customMetadata: { owner: "user1" },
+    });
+
+    const session = await worker.fetch(request("/api/buffer/session"), env);
+    expect(await session.json()).toEqual({
+      email: "operator@example.org",
+      channels: twoChannels,
+    });
+    expect((await send({ ...input, mode: "shareNow" })).status).toBe(200);
+    expect((await send(scheduled(5 * 60_000))).status).toBe(200);
+    const tooSoon = await send(scheduled(1000));
+    expect(await tooSoon.json()).toEqual({
+      message: "Choose a time from one minute to 30 days from now.",
+    });
+    expect(
+      JSON.parse(String(objects.get(`receipts/${requestId}`)?.value)),
+    ).not.toHaveProperty("service");
+    expect(denials()).toEqual([]);
+  });
+});

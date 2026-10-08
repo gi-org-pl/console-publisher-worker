@@ -8,6 +8,7 @@ import {
   type MockInstance,
   vi,
 } from "vitest";
+import { sessionSchema } from "../schemas/publishing";
 import worker, { type Env } from "./index";
 
 const { authenticate, post } = vi.hoisted(() => ({
@@ -177,10 +178,12 @@ describe("Given the publishing Worker", () => {
   });
   it("returns allowed channels without exposing the key", async () => {
     const response = await worker.fetch(request("/api/buffer/session"), env);
-    expect(await response.json()).toEqual({
+    const session = await response.json();
+    expect(session).toEqual({
       email: "operator@example.org",
       channels: JSON.parse(env.CHANNELS_JSON),
     });
+    expect(sessionSchema.safeParse(session).success).toBe(true);
   });
   it("redirects only a valid login state back to the Console", async () => {
     const state = crypto.randomUUID();
@@ -440,10 +443,16 @@ describe("Given a Cloudflare Access service token", () => {
       serviceRequest("/api/buffer/session"),
       env,
     );
-    expect(await response.json()).toEqual({
+    const session = await response.json();
+    expect(session).toEqual({
       service: "gieniek-bot",
       channels: JSON.parse(env.CHANNELS_JSON),
     });
+    expect(sessionSchema.safeParse(session).success).toBe(true);
+    expect(
+      sessionSchema.safeParse({ ...session, email: "operator@example.org" })
+        .success,
+    ).toBe(false);
   });
   it.each([
     JSON.stringify([

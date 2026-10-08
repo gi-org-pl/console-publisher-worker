@@ -9,6 +9,7 @@ import { createBufferPost } from "./buffer";
 import { error, json, readLimited } from "./http";
 import { actorFields, logError, logEvent } from "./log";
 import { imageKey } from "./media";
+import { minScheduleLeadMs, modeAllowed } from "./policy";
 import type { Channel, Env, Operator } from "./types";
 
 const MAX_BODY_BYTES = 24_000;
@@ -16,6 +17,7 @@ const DAY_MS = 86_400_000;
 
 const receiptSchema = z.object({
   owner: z.string(),
+  service: z.string().optional(),
   fingerprint: z.string(),
   postId: z.string().optional(),
 });
@@ -36,9 +38,29 @@ function receipt(
 ): string {
   return JSON.stringify({
     owner: operator.subject,
+    ...(operator.kind === "service" ? { service: operator.name } : {}),
     fingerprint: fingerprint(input),
     postId,
   });
+}
+
+/**
+ * A refused service request can mean the automation was steered by content
+ * someone planted for it, so every refusal of a restriction leaves a trace.
+ */
+function serviceDenied(
+  operator: Operator,
+  input: PublishInput,
+  reason: string,
+): void {
+  if (operator.kind === "service") {
+    logError("service-post-denied", new Error(reason), {
+      requestId: input.requestId,
+      channelId: input.channelId,
+      mode: input.mode,
+      ...actorFields(operator),
+    });
+  }
 }
 
 async function parseInput(request: Request): Promise<PublishInput | Response> {
@@ -59,7 +81,10 @@ async function parseInput(request: Request): Promise<PublishInput | Response> {
   }
 }
 
-function scheduleError(input: PublishInput): Response | undefined {
+function scheduleError(
+  input: PublishInput,
+  minLeadMs: number,
+): Response | undefined {
   if (input.mode !== "customScheduled") {
     return input.dueAt ? error("Invalid schedule time.", 400) : undefined;
   }
@@ -68,11 +93,15 @@ function scheduleError(input: PublishInput): Response | undefined {
   const now = Date.now();
   if (
     Number.isNaN(dueAt) ||
-    dueAt < now + MIN_SCHEDULE_LEAD_MS ||
+    dueAt < now + minLeadMs ||
     dueAt > now + MAX_SCHEDULE_DAYS * DAY_MS
   ) {
+    const earliest =
+      minLeadMs === MIN_SCHEDULE_LEAD_MS
+        ? "one minute"
+        : `${minLeadMs / 60_000} minutes`;
     return error(
-      `Choose a time from one minute to ${MAX_SCHEDULE_DAYS} days from now.`,
+      `Choose a time from ${earliest} to ${MAX_SCHEDULE_DAYS} days from now.`,
       400,
     );
   }
@@ -119,13 +148,20 @@ export async function createPost(
     return input;
   }
 
+  if (!modeAllowed(operator, input.mode)) {
+    serviceDenied(operator, input, "Mode not allowed for a service");
+    return error("A service may only queue or schedule a post.", 403);
+  }
+
   const channel = channels.find((entry) => entry.id === input.channelId);
   if (!channel) {
+    serviceDenied(operator, input, "Channel not allowed");
     return error("This channel is not allowed.", 403);
   }
 
-  const schedule = scheduleError(input);
+  const schedule = scheduleError(input, minScheduleLeadMs(operator));
   if (schedule) {
+    serviceDenied(operator, input, "Schedule time not allowed");
     return schedule;
   }
 

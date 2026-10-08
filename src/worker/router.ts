@@ -20,6 +20,8 @@ function toOperator(identity: Identity, env: Env): Operator | undefined {
       kind: "service",
       name: service.name,
       subject: `service:${service.clientId}`,
+      minScheduleLeadMs: service.minScheduleLeadMinutes * 60_000,
+      channelIds: service.channelIds,
     }
   );
 }

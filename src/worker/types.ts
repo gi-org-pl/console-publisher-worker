@@ -29,6 +29,9 @@ export interface ServiceOperator {
   kind: "service";
   name: string;
   subject: string;
+  minScheduleLeadMs: number;
+  /** When set, the only channels this service may use. */
+  channelIds?: string[];
 }
 
 export type Operator = UserOperator | ServiceOperator;

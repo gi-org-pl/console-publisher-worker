@@ -7,10 +7,12 @@ Console calls these same-origin routes:
 | Path | Access | Purpose |
 | --- | --- | --- |
 | `/api/buffer/login` | Operator only | Complete Access login, then return to Console |
-| `/api/buffer/session` | Operator only | Operator email and approved channels |
-| `/api/buffer/media` | Operator only | Upload one generated PNG to private R2 |
-| `/api/buffer/posts` | Operator only | Create one Buffer post |
+| `/api/buffer/session` | Operator or allowlisted service | Caller identity and approved channels |
+| `/api/buffer/media` | Operator or allowlisted service | Upload one generated PNG to private R2 |
+| `/api/buffer/posts` | Operator or allowlisted service | Create one Buffer post |
 | `/buffer-media/<uuid>.png` | Public read | Let Buffer fetch an uploaded image |
+
+An operator is a person signed in through Cloudflare Access. A service is an automation that presents a Cloudflare Access service token; see [Service tokens for automation](#service-tokens-for-automation). Both go through the same Access application - there is no route that bypasses it.
 
 The Buffer key exists only as a Worker secret. The `CHANNELS_JSON` setting is a server-side allowlist. Each post uses one PNG and one channel, with immediate publishing, the Buffer queue, or a scheduled time up to 30 days ahead. The image is not published until the operator submits the Console form.
 
@@ -48,6 +50,55 @@ Create one **Self-hosted** Cloudflare Access application for `console.gi.org.pl/
 
 Do **not** protect `/buffer-media/*` with that Access application: Buffer must fetch PNGs without a browser cookie. The Worker allows only GET/HEAD for UUID PNG paths there. Anyone holding a media URL can read that image, so upload only publication-ready graphics. The private R2 bucket has no public bucket endpoint.
 
+## Service tokens for automation
+
+A trusted non-browser client (for example the foundation's bot, which prepares posts from briefs) can call `/api/buffer/session`, `/api/buffer/media` and `/api/buffer/posts` with a [Cloudflare Access service token](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/). The Worker keeps no secret of its own for this: Access checks the token, and the Worker checks the JWT that Access issues. A service has to pass two gates, and both are closed by default:
+
+1. an Access policy on the `/api/buffer/*` application that admits that one service token, and
+2. an entry for its Client ID in the Worker's `SERVICES_JSON` allowlist.
+
+### Create a token
+
+1. In the Cloudflare dashboard go to **Zero Trust** > **Access controls** > **Service credentials** > **Service Tokens** and select **Create Service Token**. Name it after the client, choose the shortest duration you can live with, and select **Generate token**.
+2. Copy the Client ID and the Client Secret. The secret is shown only once. Store it in the client's secret store - never in Git, in `SERVICES_JSON`, or in chat. The Client ID is not a secret.
+3. Open the existing Access application for `console.gi.org.pl/api/buffer/*` and add a second policy with the action **Service Auth** and one Include rule: selector **Service Token**, value the token you just created. Do not use **Any Access Service Token**, **Valid Certificate** or **Common Name** here, and do not create a separate application for the service. Leave the operator's Allow policy as it is.
+4. Add the Client ID to `SERVICES_JSON` in `wrangler.jsonc` under a short name (lowercase letters, digits and hyphens), then deploy:
+
+   ```json
+   "SERVICES_JSON": "[{\"clientId\":\"0123456789abcdef0123456789abcdef.access\",\"name\":\"gieniek-bot\"}]"
+   ```
+
+The client then sends both headers with every request, and no `Origin` header:
+
+```sh
+curl https://console.gi.org.pl/api/buffer/session \
+  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
+```
+
+A service session returns `{ "service": "<name>", "channels": [...] }` instead of an operator `email`.
+
+### What the Worker checks
+
+The signature, issuer, audience and expiry checks are the same as for an operator. A service token JWT differs only in its identity claims, [as documented by Cloudflare](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/application-token/): `sub` is an empty string, there is no `email`, and `common_name` holds the Client ID. The Worker accepts exactly that shape (plus `type: "app"`) and refuses anything in between, such as a token that carries both an email and a `common_name`.
+
+- A valid service token whose Client ID is not in `SERVICES_JSON` gets 403 and a `service-denied` log line with the Client ID.
+- An unset or empty `SERVICES_JSON` admits no service. An invalid one fails closed with 503 for services only; operators are not affected.
+- `/api/buffer/login` is a browser redirect and returns 403 to a service.
+- Uploaded images belong to the identity that uploaded them. A service can only post its own uploads, and an operator cannot post a service's upload.
+- Log lines for posts carry `"actor":"user"` with the operator's `email`, or `"actor":"service"` with the service name.
+
+### Origin header
+
+POST requests from an operator must carry `Origin` equal to `APP_ORIGIN`. This is CSRF protection: a browser attaches the operator's Access cookie to cross-site requests on its own, and the `Origin` header is how the Worker tells such a request apart. A service token is different - the client has to add the credential headers itself, so a third-party page cannot trigger an authenticated request. A service may therefore omit `Origin`. If it does send one, it must still equal `APP_ORIGIN`, so a service identity can never be driven from another site's page.
+
+### Revoke and rotate
+
+- **Revoke now:** delete the token under **Service Tokens**. Access stops admitting it. Then remove its entry from `SERVICES_JSON` and deploy.
+- **Suspend without touching Cloudflare:** remove the entry from `SERVICES_JSON` and deploy. The token still passes Access but the Worker answers 403.
+- **Rotate the secret:** select the three dots next to the token > **Rotate secret**. The Client ID stays the same, so `SERVICES_JSON` does not change; update the secret on the client.
+- **Expiry:** a token stops working at the end of its duration. **Refresh** or **Edit** it before then, or create a new token and replace the Client ID in `SERVICES_JSON`.
+
 References: [Workers Routes](https://developers.cloudflare.com/workers/configuration/routing/routes/), [Access path applications](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/), [Access JWT validation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/).
 
 ## R2 and deployment
@@ -70,6 +121,7 @@ Edit `wrangler.jsonc`:
 | `ACCESS_TEAM_DOMAIN` | `https://YOUR-TEAM.cloudflareaccess.com` |
 | `ACCESS_AUD` | Audience tag of the `/api/buffer/*` Access application |
 | `CHANNELS_JSON` | JSON string with approved channel IDs, names, and service values |
+| `SERVICES_JSON` | JSON string with the allowlisted service tokens (Client ID and name). `[]` admits none |
 
 Example channel setting:
 
@@ -100,4 +152,6 @@ After deployment, set `BUFFER_ENABLED=true` as a GitHub Actions variable in the 
 4. Confirm that `/buffer-media/<uuid>.png` works without Access while `/api/buffer/session` requires it. Never broaden an Access bypass to fix an API error.
 5. For a 502 or ambiguous network error, inspect Buffer's queue and history before trying again. The Worker reserves a request ID in R2 to block duplicate submissions. It intentionally does not retry Buffer mutations.
 
-Worker tests use mocked Buffer/R2 and signed Access JWT fixtures; they do not publish real posts. `yarn worker:dev` has no authentication bypass. Use an Access-protected staging hostname and test Buffer channel for integrated testing.
+6. If a service token is configured: call `/api/buffer/session` with its two headers and confirm the response names the service. Then confirm that a second service token which is not in `SERVICES_JSON` gets 403, and that the same call without the headers is stopped by Access.
+
+Worker tests use mocked Buffer/R2 and signed Access JWT fixtures; they do not publish real posts. The service token fixture follows Cloudflare's documented payload; it has not been compared with a token issued by the production Access application, so do step 6 before relying on it. `yarn worker:dev` has no authentication bypass. Use an Access-protected staging hostname and test Buffer channel for integrated testing.

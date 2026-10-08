@@ -7,7 +7,7 @@ import {
 } from "../schemas/publishing";
 import { createBufferPost } from "./buffer";
 import { error, json, readLimited } from "./http";
-import { logError, logEvent } from "./log";
+import { actorFields, logError, logEvent } from "./log";
 import { imageKey } from "./media";
 import type { Channel, Env, Operator } from "./types";
 
@@ -139,7 +139,11 @@ export async function createPost(
     return replay;
   }
 
-  const context = { requestId: input.requestId, channelId: channel.id };
+  const context = {
+    requestId: input.requestId,
+    channelId: channel.id,
+    ...actorFields(operator),
+  };
   let postId: string;
   try {
     postId = await createBufferPost(env, input, channel);
@@ -152,11 +156,7 @@ export async function createPost(
     );
   }
 
-  logEvent("buffer-post-created", {
-    ...context,
-    email: operator.email,
-    postId,
-  });
+  logEvent("buffer-post-created", { ...context, postId });
 
   try {
     await env.MEDIA.put(receiptKey(input), receipt(operator, input, postId));

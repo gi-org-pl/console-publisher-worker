@@ -837,6 +837,21 @@ describe("the state", () => {
         channels: {},
       });
     });
+
+    it("keeps the address of the Worker it was made against", () => {
+      const state = {
+        version: 1 as const,
+        origin: "https://console.gi.org.pl",
+        channels: {},
+      };
+      expect(parseState(serializeState(state))).toEqual(state);
+    });
+
+    it("refuses an address that is not text", () => {
+      expect(() =>
+        parseState(JSON.stringify({ version: 1, origin: 1, channels: {} })),
+      ).toThrow(expect.objectContaining({ code: "invalid-state" }));
+    });
   });
 
   describe("when the file is not a state of this client", () => {

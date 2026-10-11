@@ -331,6 +331,17 @@ async function execute(argv, deps, document, secrets, log) {
 
   const prepared =
     options.command === "check" ? undefined : await prepareJob(options, deps);
+  // A post created at one address says nothing about another: a state made
+  // against a local Worker must not make a run against the Console skip a post.
+  if (prepared) {
+    const { state, statePath } = prepared;
+    if (state.origin !== undefined && state.origin !== document.url)
+      throw new ClientError(
+        "state-mismatch",
+        `The state file (${statePath}) was made against ${state.origin} and this run goes to ${document.url}. Use another state file (--state).`,
+      );
+    state.origin = document.url;
+  }
 
   const credentials = await resolveCredentials(options, deps);
   secrets.push(credentials.clientSecret, credentials.clientId);
@@ -508,8 +519,11 @@ export async function run(argv, overrides = {}) {
     timeoutMs: REQUEST_TIMEOUT_MS,
     ...overrides,
   };
-  // Known before anything can fail, so no early error can carry it either.
-  const secrets = [deps.env.CF_ACCESS_CLIENT_SECRET].filter(Boolean);
+  // Known before anything can fail, so no early error can carry them either.
+  const secrets = [
+    deps.env.CF_ACCESS_CLIENT_SECRET,
+    deps.env.CF_ACCESS_CLIENT_ID,
+  ].filter(Boolean);
   /** @type {Report} */
   const document = {
     ok: false,

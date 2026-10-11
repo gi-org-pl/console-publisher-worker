@@ -619,6 +619,9 @@ const entrySchema = z
 
 const stateSchema = z.strictObject({
   version: z.literal(1),
+  // The Worker the state was made against. Missing in a state written before
+  // the client recorded it; such a state takes the address of the next run.
+  origin: z.string().min(1).optional(),
   channels: z.record(z.string().min(1), entrySchema),
 });
 

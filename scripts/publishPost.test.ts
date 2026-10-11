@@ -1405,6 +1405,56 @@ describe("the state file", () => {
     });
   });
 
+  describe("when the state was made against another address", () => {
+    it("records the address of the Worker in the state", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      await client(["queue", job]);
+      expect(
+        JSON.parse(await readFile(path.join(dir, "post.state.json"), "utf8"))
+          .origin,
+      ).toBe(origin);
+    });
+
+    it("sends nothing and leaves the state as it is", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      await client(["queue", job, "--send"]);
+      const statePath = path.join(dir, "post.state.json");
+      const elsewhere = JSON.stringify({
+        ...JSON.parse(await readFile(statePath, "utf8")),
+        origin: "https://console.gi.org.pl",
+      });
+      await writeFile(statePath, elsewhere);
+      seen = [];
+
+      const { exitCode, document } = await client(["queue", job, "--send"]);
+      expect(exitCode).toBe(1);
+      expect(document.errors).toEqual([
+        {
+          code: "state-mismatch",
+          message: `The state file (${statePath}) was made against https://console.gi.org.pl and this run goes to ${origin}. Use another state file (--state).`,
+        },
+      ]);
+      expect(document.channels).toEqual([]);
+      expect(count()).toEqual({ session: 0, media: 0, posts: 0 });
+      expect(await readFile(statePath, "utf8")).toBe(elsewhere);
+    });
+
+    it("takes a state without an address as its own", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      await client(["queue", job, "--send"]);
+      const statePath = path.join(dir, "post.state.json");
+      const { origin: _dropped, ...older } = JSON.parse(
+        await readFile(statePath, "utf8"),
+      );
+      await writeFile(statePath, JSON.stringify(older));
+
+      const { exitCode, document } = await client(["queue", job, "--send"]);
+      expect(exitCode).toBe(0);
+      expect(document.channels[0].outcome).toBe("already-created");
+      expect(JSON.parse(await readFile(statePath, "utf8")).origin).toBe(origin);
+    });
+  });
+
   describe("when the session lists a channel twice", () => {
     it("sends nothing and says so", async () => {
       const job = await writeJob();
@@ -1552,6 +1602,21 @@ describe("the secret", () => {
       return localFetch(input, init);
     };
   };
+
+  describe("when an error before the credentials are loaded names the Client ID", () => {
+    it("is removed from the report all the same", async () => {
+      const { exitCode, document, logs } = await client([
+        "queue",
+        `${clientId}.json`,
+      ]);
+      expect(exitCode).toBe(1);
+      expect(document.errors[0].code).toBe("invalid-job");
+      expect(document.errors[0].message).toMatch(/^Cannot read the job /);
+      expect(JSON.stringify(document)).not.toContain(clientId);
+      expect(logs.join("\n")).not.toContain(clientId);
+      expect(count()).toEqual({ session: 0, media: 0, posts: 0 });
+    });
+  });
 
   describe("when a failed request names it", () => {
     it.each([

@@ -630,6 +630,24 @@ describe("the Windows credential store", () => {
     });
   });
 
+  describe("when an error about the job names the stored Client ID", () => {
+    it("is removed from the report", async () => {
+      const reader = vi.fn(async () =>
+        stored({ clientId, clientSecret: clientSecret }),
+      );
+      const { exitCode, document, logs } = await client(
+        ["queue", `${clientId}.json`, "--credential", "console-bot"],
+        { env: {}, platform: "win32", runProcess: reader },
+      );
+      expect(exitCode).toBe(1);
+      expect(reader).toHaveBeenCalledTimes(1);
+      expect(document.errors[0].code).toBe("invalid-job");
+      expect(JSON.stringify(document)).not.toContain(clientId);
+      expect(logs.join("\n")).not.toContain(clientId);
+      expect(count()).toEqual({ session: 0, media: 0, posts: 0 });
+    });
+  });
+
   describe("when the environment has both variables", () => {
     it("does not read the store", async () => {
       const reader = vi.fn();
@@ -1570,6 +1588,62 @@ describe("the state file", () => {
       });
       expect(document.channels[0].outcome).toBe("failed");
       expect(count()).toEqual({ session: 1, media: 1, posts: 0 });
+    });
+
+    describe("and the later writes go through", () => {
+      const failingAt = (failAt: number) => {
+        let writes = 0;
+        return {
+          readFile,
+          rename,
+          writeFile: async (file: string, data: string, options: object) => {
+            if (++writes === failAt)
+              throw Object.assign(new Error("busy"), { code: "EBUSY" });
+            return writeFile(file, data, options);
+          },
+        };
+      };
+
+      it("does not record a post request that was never sent", async () => {
+        const job = await writeJob();
+        // The fourth write of a run is the one before the first post.
+        const first = await client(["queue", job, "--send"], {
+          fs: failingAt(4),
+        });
+        expect(first.exitCode).toBe(1);
+        expect(first.document.channels.map(({ outcome }) => outcome)).toEqual([
+          "failed",
+          "created",
+        ]);
+        expect(count()).toEqual({ session: 1, media: 2, posts: 1 });
+        const kept = (await readState()).channels.li1;
+        expect(kept.step).toBe("uploaded");
+        expect(kept.mediaId).toEqual(expect.any(String));
+
+        seen = [];
+        const second = await client(["queue", job, "--send"]);
+        expect(second.exitCode).toBe(0);
+        expect(second.document.channels.map(({ outcome }) => outcome)).toEqual([
+          "created",
+          "already-created",
+        ]);
+        // The upload of the first run is used again.
+        expect(count()).toEqual({ session: 1, media: 0, posts: 1 });
+      });
+
+      it("does not record an upload that was never started", async () => {
+        const job = await writeJob();
+        // The second write of a run is the one before the first upload.
+        const { document } = await client(["queue", job, "--send"], {
+          fs: failingAt(2),
+        });
+        expect(document.channels.map(({ outcome }) => outcome)).toEqual([
+          "failed",
+          "created",
+        ]);
+        expect((await readState()).channels.li1.step).toBe("prepared");
+        expect(count()).toEqual({ session: 1, media: 1, posts: 1 });
+      });
     });
 
     it("still reports a created post and says the state lacks it", async () => {

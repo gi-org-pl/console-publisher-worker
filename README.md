@@ -154,7 +154,7 @@ Relative paths in the arguments are relative to the current directory. The clien
 
 The client takes the service token from the environment: `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. When they are not both set and `--credential <name>` is given, it reads the generic credential of that name from the Windows credential store (Credential Manager > Windows Credentials > Add a generic credential): the user name is the Client ID, the password is the Client Secret. Without either, the client fails with `missing-credentials` and sends nothing.
 
-The secret is used for the request headers only. It is never printed, never written to the state file and never part of an error message: every text the client prints or writes has both values of the token removed first, also when a failed request or the other side repeats them.
+The secret is used for the request headers only. It is never printed, never written to the state file and never part of an error message: every text the client prints or writes has both values of the token removed first, also when a failed request or the other side repeats them. The credentials are resolved before the job is read, so this holds for an error about the job, its files or its state as well. Only an error about the arguments themselves comes earlier than a read of the credential store.
 
 ### The job
 
@@ -185,7 +185,7 @@ The secret is used for the request headers only. It is never printed, never writ
 
 ### State and reruns
 
-For every channel the client keeps a request ID and how far it got, in the state file: `prepared`, `uploading`, `uploaded`, `posting`, `created`, `refused` or `failed`. The file is written before each request, so a run that dies in the middle leaves a trace. It holds IDs, the network name, a digest of the content, HTTP statuses and messages - no text of the post and no credentials.
+For every channel the client keeps a request ID and how far it got, in the state file: `prepared`, `uploading`, `uploaded`, `posting`, `created`, `refused` or `failed`. The file is written before each request, so a run that dies in the middle leaves a trace. When that write fails, the request is not sent and the step is taken back, so the file never says that a request went out which did not. It holds IDs, the network name, a digest of the content, HTTP statuses and messages - no text of the post and no credentials.
 
 - A channel whose post was created is never sent again: a second run with the same job and state file sends nothing new and reports the same post IDs as `already-created`.
 - A channel that was refused, or whose upload failed, is tried again on the next run with the same request ID. A changed job is accepted as long as no post was created for it.

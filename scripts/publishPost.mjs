@@ -264,11 +264,24 @@ async function sendChannel(plan, run) {
       delete entry[key];
     Object.assign(entry, fields);
   };
+  // The step written before a request. When the write fails the request is
+  // not sent, so the step is taken back: a later write, of another channel,
+  // must not record a step this channel never reached.
+  const mark = async (fields) => {
+    const before = { ...entry };
+    set(fields);
+    try {
+      await save();
+    } catch (cause) {
+      for (const key of Object.keys(entry)) delete entry[key];
+      Object.assign(entry, before);
+      throw cause;
+    }
+  };
 
   let { mediaId } = entry;
   if (entry.step !== "uploaded" || !mediaId) {
-    set({ step: "uploading" });
-    await save();
+    await mark({ step: "uploading" });
     const answer = await callWorker(
       context,
       buildUploadRequest(credentials, plan.image.bytes),
@@ -299,8 +312,7 @@ async function sendChannel(plan, run) {
     mode: run.mode,
     ...(run.dueAt ? { dueAt: run.dueAt } : {}),
   });
-  set({ step: "posting", mediaId });
-  await save();
+  await mark({ step: "posting", mediaId });
   const answer = await callWorker(context, request);
   log(`${label}: post ${answer.status || "no answer"}`);
 
@@ -329,6 +341,11 @@ async function execute(argv, deps, document, secrets, log) {
   document.sent = options.send;
   document.url = resolveBaseUrl(options.url);
 
+  // Before the job is read, so an error about the job, its files or its state
+  // is free of both values also when they come from the credential store.
+  const credentials = await resolveCredentials(options, deps);
+  secrets.push(credentials.clientSecret, credentials.clientId);
+
   const prepared =
     options.command === "check" ? undefined : await prepareJob(options, deps);
   // A post created at one address says nothing about another: a state made
@@ -342,9 +359,6 @@ async function execute(argv, deps, document, secrets, log) {
       );
     state.origin = document.url;
   }
-
-  const credentials = await resolveCredentials(options, deps);
-  secrets.push(credentials.clientSecret, credentials.clientId);
 
   const context = {
     fetch: deps.fetch,

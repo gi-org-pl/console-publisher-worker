@@ -192,6 +192,8 @@ For every channel the client keeps a request ID and how far it got, in the state
 - A channel whose post request went out without a recorded result (`posting`) is **not** sent again automatically, whatever the reason: no answer, a 5xx, a 409, or a run that was stopped. It is reported as `unknown`. Look in Buffer first. If the post is there, nothing is left to do for that channel; if it is not, delete the channel's entry from the state file and run again.
 - A job that changed after one of its posts was created is refused with `state-mismatch`. A new post needs a new state file.
 - A state file that cannot be read is never replaced, and the first write never overwrites a file that another run created in the meantime. Do not run two sends of the same job at once.
+- Every later write goes to `<state file>.tmp` first and replaces the state file in one step, so a run that is stopped in the middle of a write leaves the last complete state behind, never half of a new one.
+- A session that lists the same channel ID twice is refused as a whole (`duplicate-channel`) and nothing is sent: the state has one entry per channel, and two entries of one channel would mean two posts. The fix is in the Worker's `CHANNELS_JSON`.
 
 ### Output
 
@@ -247,7 +249,7 @@ Stdout is one JSON document; nothing else is printed there. Progress lines go to
 | `failed` | The upload got no usable answer, or the state file could not be written. No post request was sent. |
 | `unknown` | A post request was sent and no created post was recorded. The post may exist: look in Buffer. See [State and reruns](#state-and-reruns). |
 
-`errors` holds what stopped the run before the channels, each with a `code`, a `message` and, for an HTTP answer, a `status`: `invalid-arguments`, `invalid-job`, `invalid-state`, `missing-credentials`, `invalid-credentials`, `credential-unavailable`, `session-failed`, `unknown-channel`, `state-mismatch`, `state-failed`, `unexpected`. A `state-failed` error next to a `created` channel means the post exists but the state file does not have it; fix the file before the next run. Stdout is the JSON document in every one of these cases.
+`errors` holds what stopped the run before the channels, each with a `code`, a `message` and, for an HTTP answer, a `status`: `invalid-arguments`, `invalid-job`, `invalid-state`, `missing-credentials`, `invalid-credentials`, `credential-unavailable`, `session-failed`, `duplicate-channel`, `unknown-channel`, `state-mismatch`, `state-failed`, `unexpected`. A `state-failed` error next to a `created` channel means the post exists but the state file does not have it; fix the file before the next run. Stdout is the JSON document in every one of these cases.
 
 ### Permission rule
 

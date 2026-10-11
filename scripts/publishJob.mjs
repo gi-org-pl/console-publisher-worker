@@ -281,6 +281,16 @@ function findOverride(values, channel) {
 export function selectChannels(job, available) {
   const matches = (key, channel) =>
     channel.id === key || channel.service === key;
+  // The state keeps one entry per channel id. An id listed twice would get two
+  // request ids and two posts, so a session like that is refused as a whole.
+  const repeated = available
+    .map((channel) => channel.id)
+    .filter((id, index, ids) => ids.indexOf(id) !== index);
+  if (repeated.length > 0)
+    throw new ClientError(
+      "duplicate-channel",
+      `The session lists a channel more than once: ${[...new Set(repeated)].join(", ")}. Nothing is sent until the Worker's channel list is fixed.`,
+    );
   const problems = [];
   let selected = available;
   if (job.channels) {

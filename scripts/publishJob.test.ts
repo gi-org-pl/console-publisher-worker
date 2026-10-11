@@ -426,6 +426,27 @@ describe("selectChannels", () => {
       );
     });
   });
+
+  describe("when the session lists a channel twice", () => {
+    const twice = [...channels, { ...channels[0], name: "Listed again" }];
+
+    it("refuses the session as a whole, naming the id once", () => {
+      const select = () =>
+        selectChannels(empty, [...twice, { ...channels[0], name: "A third" }]);
+      expect(select).toThrow(
+        "The session lists a channel more than once: li1. Nothing is sent until the Worker's channel list is fixed.",
+      );
+      expect(select).toThrow(
+        expect.objectContaining({ code: "duplicate-channel" }),
+      );
+    });
+
+    it("refuses it also when the job does not select that channel", () => {
+      expect(() =>
+        selectChannels({ ...empty, channels: ["instagram"] }, twice),
+      ).toThrow(expect.objectContaining({ code: "duplicate-channel" }));
+    });
+  });
 });
 
 describe("channelContent", () => {

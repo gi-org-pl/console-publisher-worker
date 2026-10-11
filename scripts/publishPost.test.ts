@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -1404,11 +1405,92 @@ describe("the state file", () => {
     });
   });
 
+  describe("when the session lists a channel twice", () => {
+    it("sends nothing and says so", async () => {
+      const job = await writeJob();
+      env.CHANNELS_JSON = JSON.stringify([linkedin, instagram, linkedin]);
+      const { exitCode, document } = await client(["queue", job, "--send"]);
+      expect(exitCode).toBe(1);
+      expect(document.errors).toEqual([
+        {
+          code: "duplicate-channel",
+          message:
+            "The session lists a channel more than once: li1. Nothing is sent until the Worker's channel list is fixed.",
+        },
+      ]);
+      expect(document.channels).toEqual([]);
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+    });
+  });
+
+  describe("when the state is written again during a run", () => {
+    it("replaces the file through a draft, never in place", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      const statePath = path.join(dir, "post.state.json");
+      const calls: string[] = [];
+      const { exitCode } = await client(["queue", job, "--send"], {
+        fs: {
+          readFile,
+          writeFile: async (file: string, data: string, options: object) => {
+            calls.push(
+              `write ${path.basename(file)} ${JSON.stringify(options)}`,
+            );
+            return writeFile(file, data, options);
+          },
+          rename: async (from: string, to: string) => {
+            calls.push(`rename ${path.basename(from)} -> ${path.basename(to)}`);
+            return rename(from, to);
+          },
+        },
+      });
+      expect(exitCode).toBe(0);
+      expect(calls[0]).toBe('write post.state.json {"flag":"wx"}');
+      const later = calls.slice(1);
+      expect(later.length).toBeGreaterThan(0);
+      expect(later.length % 2).toBe(0);
+      for (let index = 0; index < later.length; index += 2) {
+        expect(later[index]).toBe(
+          'write post.state.json.tmp {"flag":"w","flush":true}',
+        );
+        expect(later[index + 1]).toBe(
+          "rename post.state.json.tmp -> post.state.json",
+        );
+      }
+      expect(await readdir(dir)).not.toContain("post.state.json.tmp");
+      expect((await readState()).channels.li1.step).toBe("created");
+      expect(JSON.parse(await readFile(statePath, "utf8")).version).toBe(1);
+    });
+
+    it("keeps the last complete state when a write dies half-way", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      const statePath = path.join(dir, "post.state.json");
+      let writes = 0;
+      const { exitCode, document } = await client(["queue", job, "--send"], {
+        fs: {
+          readFile,
+          rename,
+          // The third write of the run stops after half of its content.
+          writeFile: async (file: string, data: string, options: object) => {
+            if (++writes !== 3) return writeFile(file, data, options);
+            await writeFile(file, data.slice(0, Math.floor(data.length / 2)));
+            throw Object.assign(new Error("killed"), { code: "EIO" });
+          },
+        },
+      });
+      expect(exitCode).toBe(1);
+      expect(document.channels[0].outcome).toBe("failed");
+      const kept = JSON.parse(await readFile(statePath, "utf8"));
+      expect(kept.channels.li1.requestId).toBe(document.channels[0].requestId);
+      expect(count().posts).toBe(0);
+    });
+  });
+
   describe("when a write fails in the middle of a run", () => {
     const failingFrom = (failAt: number) => {
       let writes = 0;
       return {
         readFile,
+        rename,
         writeFile: async (file: string, data: string, options: object) => {
           if (++writes >= failAt)
             throw Object.assign(new Error("disk full"), { code: "ENOSPC" });

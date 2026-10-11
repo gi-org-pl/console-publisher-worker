@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { sessionSchema, uploadSchema } from "../src/schemas/publishing.ts";
@@ -385,12 +385,17 @@ async function execute(argv, deps, document, secrets, log) {
   let stateOnDisk = prepared.stateExists;
   const save = async () => {
     try {
-      // The first write must not replace a file another run has just made.
-      await deps.fs.writeFile(
-        statePath,
-        serializeState(redactDeep(state, secrets)),
-        { flag: stateOnDisk ? "w" : "wx" },
-      );
+      const data = serializeState(redactDeep(state, secrets));
+      if (stateOnDisk) {
+        // A later write replaces the file in one step: a run that dies in the
+        // middle of it leaves the last complete state, not half of a new one.
+        const draft = `${statePath}.tmp`;
+        await deps.fs.writeFile(draft, data, { flag: "w", flush: true });
+        await deps.fs.rename(draft, statePath);
+      } else {
+        // The first write must not replace a file another run has just made.
+        await deps.fs.writeFile(statePath, data, { flag: "wx" });
+      }
       stateOnDisk = true;
     } catch (cause) {
       throw new ClientError(
@@ -493,7 +498,7 @@ export async function run(argv, overrides = {}) {
   const deps = {
     env: process.env,
     fetch: globalThis.fetch,
-    fs: { readFile, writeFile },
+    fs: { readFile, rename, writeFile },
     log: (line) => process.stderr.write(`${line}\n`),
     now: () => Date.now(),
     newId: () => randomUUID(),

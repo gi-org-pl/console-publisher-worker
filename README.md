@@ -121,6 +121,151 @@ POST requests from an operator must carry `Origin` equal to `APP_ORIGIN`. This i
 
 References: [Workers Routes](https://developers.cloudflare.com/workers/configuration/routing/routes/), [Access path applications](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/), [Access JWT validation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/).
 
+## Command-line client for services
+
+`scripts/publishPost.mjs` queues or schedules a post as a service identity, from a job file. It needs no knowledge of the code: everything below is the whole interface. It runs on Node 24+ with the repository's dependencies installed (`yarn install --frozen-lockfile`) and takes the request contract and its limits from the Worker's own schema in `src/schemas/publishing.ts`.
+
+```sh
+node scripts/publishPost.mjs check
+node scripts/publishPost.mjs queue job.json [--send]
+node scripts/publishPost.mjs schedule job.json [--send]
+```
+
+| Command | What it does |
+| --- | --- |
+| `check` | Calls `/api/buffer/session` and prints the identity and the channels it may post to. Nothing else is sent. |
+| `queue <job.json>` | One post per channel in mode `addToQueue`: it goes out at the channel's next Buffer slot. |
+| `schedule <job.json>` | One post per channel in mode `customScheduled`, at the job's `dueAt`. |
+
+There is no command for `shareNow`. `queue` and `schedule` are separate commands on purpose, so a permission rule can allow one without the other.
+
+**Dry run by default.** Without `--send` the client validates the job, reads every file it names, asks for the session and prints what it would send to each channel. No upload and no post is sent. The state file is written also in a dry run, so the request IDs it prints are the ones a later `--send` uses.
+
+| Option | Meaning |
+| --- | --- |
+| `--send` | Really upload the images and create the posts. |
+| `--state <file>` | The state file. Default: the job's path with `.state.json` in place of `.json`. |
+| `--url <origin>` | Another address of the Worker, for local development: `http://localhost:8787`. Default: `https://console.gi.org.pl`. Only that origin and loopback addresses (`localhost`, `127.0.0.1`, `[::1]`) are accepted, because the credentials are sent to it. |
+| `--credential <name>` | Windows only: the name of a generic credential in the Windows credential store that holds the service token. See below. |
+
+Relative paths in the arguments are relative to the current directory. The client sends the two Access headers and no `Origin` header, and does not follow redirects.
+
+### Credentials
+
+The client takes the service token from the environment: `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. When they are not both set and `--credential <name>` is given, it reads the generic credential of that name from the Windows credential store (Credential Manager > Windows Credentials > Add a generic credential): the user name is the Client ID, the password is the Client Secret. Without either, the client fails with `missing-credentials` and sends nothing.
+
+The secret is used for the request headers only. It is never printed, never written to the state file and never part of an error message: every text the client prints or writes has both values of the token removed first, also when a failed request or the other side repeats them.
+
+### The job
+
+```json
+{
+  "textFile": "post.txt",
+  "image": "square.png",
+  "channels": ["linkedin", "facebook", "instagram"],
+  "channelText": { "instagram": "A shorter text for Instagram." },
+  "channelImage": { "instagram": "portrait.png" },
+  "dueAt": "2026-10-20T09:00:00+02:00"
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `text` or `textFile` | The text of the post, inline or as a UTF-8 file. Exactly one of the two. |
+| `image` | One PNG. The Worker's limits are checked before anything is sent: at most 5 MB, each side 1-4096 px. |
+| `channels` | Optional. Network names (`linkedin`, `facebook`, `instagram`, ...) and/or channel ids, matched against the channels of the session. A network name takes every channel of that network. Default: every channel of the session. |
+| `channelText`, `channelTextFile` | Optional. A text for one channel, keyed by network name or channel id, in place of `text`. |
+| `channelImage` | Optional. A PNG for one channel, keyed the same way, in place of `image`. |
+| `dueAt` | The time of a scheduled post, ISO 8601 with an offset or `Z`. Required for `schedule`, refused for `queue`. It is sent to the Worker in UTC. |
+
+- File paths in a job are relative to the job file.
+- An unknown key is an error. So is a name in `channels`, `channelText`, `channelTextFile` or `channelImage` that matches no selected channel (`unknown-channel`): nothing is sent until the job is right. A channel id wins over a network name when both have a variant.
+- Line endings of a text become `\n`, a byte order mark is dropped and the text is trimmed. After that it must have 1 to 5000 characters, as the Worker requires.
+- `dueAt` must be in the future and at most 30 days ahead. The lead time of the service (120 minutes by default, see [Publishing restrictions](#publishing-restrictions)) is known to the Worker only, which refuses an earlier time for each channel.
+
+### State and reruns
+
+For every channel the client keeps a request ID and how far it got, in the state file: `prepared`, `uploading`, `uploaded`, `posting`, `created`, `refused` or `failed`. The file is written before each request, so a run that dies in the middle leaves a trace. It holds IDs, the network name, a digest of the content, HTTP statuses and messages - no text of the post and no credentials.
+
+- A channel whose post was created is never sent again: a second run with the same job and state file sends nothing new and reports the same post IDs as `already-created`.
+- A channel that was refused, or whose upload failed, is tried again on the next run with the same request ID. A changed job is accepted as long as no post was created for it.
+- A channel whose post request went out without a recorded result (`posting`) is **not** sent again automatically, whatever the reason: no answer, a 5xx, a 409, or a run that was stopped. It is reported as `unknown`. Look in Buffer first. If the post is there, nothing is left to do for that channel; if it is not, delete the channel's entry from the state file and run again.
+- A job that changed after one of its posts was created is refused with `state-mismatch`. A new post needs a new state file.
+- A state file that cannot be read is never replaced, and the first write never overwrites a file that another run created in the meantime. Do not run two sends of the same job at once.
+
+### Output
+
+Stdout is one JSON document; nothing else is printed there. Progress lines go to stderr.
+
+```json
+{
+  "ok": false,
+  "command": "queue",
+  "sent": true,
+  "url": "https://console.gi.org.pl",
+  "identity": { "service": "gieniek-bot" },
+  "mode": "addToQueue",
+  "state": "/abs/post.state.json",
+  "channels": [
+    {
+      "id": "BUFFER_CHANNEL_ID",
+      "name": "Foundation LinkedIn",
+      "service": "linkedin",
+      "requestId": "5f0d7c2e-6c1b-4b7e-9a52-3f3f0a4a8f10",
+      "outcome": "created",
+      "postId": "BUFFER_POST_ID",
+      "text": "The text this channel got.",
+      "image": "/abs/square.png"
+    },
+    {
+      "id": "OTHER_CHANNEL_ID",
+      "name": "Foundation Facebook",
+      "service": "facebook",
+      "requestId": "0b1f6f0a-3a0e-4d0c-8a51-0d7b3f6d2c11",
+      "outcome": "refused",
+      "status": 403,
+      "message": "This channel is not allowed.",
+      "text": "The text this channel got.",
+      "image": "/abs/square.png"
+    }
+  ],
+  "errors": []
+}
+```
+
+- `sent` is `true` for a run with `--send` and `false` for a dry run. Whether a request went out for a channel is in its `outcome`.
+- `identity` is what the session returned (`{ "service": "<name>" }`), or `null` when the run stopped before it.
+- `mode`, `state` and, for `schedule`, `dueAt` (in UTC) are present once the job was read. `check` has none of them, and its `channels` are the session's channels as they are: `id`, `name`, `service`.
+- The exit code is `0` when `ok` is `true` and `1` otherwise. `ok` is `true` when `errors` is empty and every selected channel ended as `would-send`, `created` or `already-created`. Channels that succeeded are still listed when another one did not.
+
+| `outcome` | Meaning |
+| --- | --- |
+| `would-send` | Dry run: the channel is ready and nothing was sent. |
+| `created` | The post was created in this run; `postId` is Buffer's ID. |
+| `already-created` | The state file has the post for exactly this content; nothing was sent. `postId` as before. |
+| `refused` | The Worker or Access answered and turned the upload or the post down; `status` and `message` are its answer (403 for a channel that is not allowed, 400 for a `dueAt` inside the lead time). Nothing was created. |
+| `failed` | The upload got no usable answer, or the state file could not be written. No post request was sent. |
+| `unknown` | A post request was sent and no created post was recorded. The post may exist: look in Buffer. See [State and reruns](#state-and-reruns). |
+
+`errors` holds what stopped the run before the channels, each with a `code`, a `message` and, for an HTTP answer, a `status`: `invalid-arguments`, `invalid-job`, `invalid-state`, `missing-credentials`, `invalid-credentials`, `credential-unavailable`, `session-failed`, `unknown-channel`, `state-mismatch`, `state-failed`, `unexpected`. A `state-failed` error next to a `created` channel means the post exists but the state file does not have it; fix the file before the next run. Stdout is the JSON document in every one of these cases.
+
+### Permission rule
+
+An operator who lets an agent run this client can allow one command and leave the others to a question. For Claude Code, in `.claude/settings.json` of the checkout the agent works in:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(node scripts/publishPost.mjs check:*)",
+      "Bash(node scripts/publishPost.mjs queue:*)"
+    ]
+  }
+}
+```
+
+The rules match the start of the command, so they cover the job path, `--send` and `--credential`, and they do not cover `schedule`. They decide what may run without a question, not when the agent should publish; that belongs to its own instructions. What a service may publish at all stays limited by the Worker, see [Publishing restrictions](#publishing-restrictions).
+
 ## R2 and deployment
 
 Use Node 24+ and Yarn 1.22. Enable R2 in your Cloudflare account, then:
@@ -174,4 +319,4 @@ After deployment, set `BUFFER_ENABLED=true` as a GitHub Actions variable in the 
 
 6. If a service token is configured: call `/api/buffer/session` with its two headers and confirm the response names the service. Then confirm that a second service token which is not in `SERVICES_JSON` gets 403, and that the same call without the headers is stopped by Access. With the service token, confirm that a `shareNow` post returns 403 and that a post scheduled 10 minutes ahead returns 400; neither may appear in Buffer.
 
-Worker tests use mocked Buffer/R2 and signed Access JWT fixtures; they do not publish real posts. The service token fixture follows Cloudflare's documented payload; it has not been compared with a token issued by the production Access application, so do step 6 before relying on it. `yarn worker:dev` has no authentication bypass. Use an Access-protected staging hostname and test Buffer channel for integrated testing.
+Worker tests use mocked Buffer/R2 and signed Access JWT fixtures; they do not publish real posts. The service token fixture follows Cloudflare's documented payload; it has not been compared with a token issued by the production Access application, so do step 6 before relying on it. The tests of the command-line client run it against the Worker's code served on `127.0.0.1`, with the same stand-ins for Access, R2 and Buffer; no test talks to the live Worker or reads the Windows credential store. `yarn worker:dev` has no authentication bypass. Use an Access-protected staging hostname and test Buffer channel for integrated testing.

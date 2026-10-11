@@ -813,11 +813,13 @@ describe("isRefusal and classifyPost", () => {
 
 describe("the state", () => {
   const entry = { requestId, digest, step: "prepared" as const };
+  const origin = "https://console.gi.org.pl";
 
   describe("when a state is written and read back", () => {
     it("is the same state", () => {
       const state = {
         version: 1 as const,
+        origin: "https://console.gi.org.pl",
         channels: {
           li1: { ...entry, service: "linkedin", step: "created", postId: "p1" },
           fb1: {
@@ -832,25 +834,13 @@ describe("the state", () => {
       const text = serializeState(state);
       expect(text.endsWith("}\n")).toBe(true);
       expect(parseState(text)).toEqual(state);
-      expect(parseState(serializeState(emptyState()))).toEqual({
+      expect(
+        parseState(serializeState(emptyState("https://console.gi.org.pl"))),
+      ).toEqual({
         version: 1,
-        channels: {},
-      });
-    });
-
-    it("keeps the address of the Worker it was made against", () => {
-      const state = {
-        version: 1 as const,
         origin: "https://console.gi.org.pl",
         channels: {},
-      };
-      expect(parseState(serializeState(state))).toEqual(state);
-    });
-
-    it("refuses an address that is not text", () => {
-      expect(() =>
-        parseState(JSON.stringify({ version: 1, origin: 1, channels: {} })),
-      ).toThrow(expect.objectContaining({ code: "invalid-state" }));
+      });
     });
   });
 
@@ -859,13 +849,25 @@ describe("the state", () => {
       ["", /^The state file is not valid JSON/],
       ["{}", /^The state file is not a state of this client: version: /],
       ['{"version":2,"channels":{}}', /version: /],
+      // A state without the address of its Worker, as an early build wrote it.
       [
-        JSON.stringify({ version: 1, channels: { li1: { requestId } } }),
+        '{"version":1,"channels":{}}',
+        /^The state file is not a state of this client: origin: /,
+      ],
+      [JSON.stringify({ version: 1, origin: 1, channels: {} }), /origin: /],
+      [JSON.stringify({ version: 1, origin: "", channels: {} }), /origin: /],
+      [
+        JSON.stringify({
+          version: 1,
+          origin,
+          channels: { li1: { requestId } },
+        }),
         /channels\.li1\.digest: /,
       ],
       [
         JSON.stringify({
           version: 1,
+          origin,
           channels: { li1: { ...entry, step: "sent" } },
         }),
         /channels\.li1\.step: /,
@@ -873,6 +875,7 @@ describe("the state", () => {
       [
         JSON.stringify({
           version: 1,
+          origin,
           channels: { li1: { ...entry, step: "created" } },
         }),
         /channels\.li1: a "created" entry needs a postId/,
@@ -880,6 +883,7 @@ describe("the state", () => {
       [
         JSON.stringify({
           version: 1,
+          origin,
           channels: { li1: { ...entry, clientSecret: "x" } },
         }),
         /Unrecognized key/,

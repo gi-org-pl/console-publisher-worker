@@ -179,7 +179,7 @@ async function openSession(context, credentials, log) {
 }
 
 /** Reads the job and every file it names; nothing leaves the machine here. */
-async function prepareJob(options, deps) {
+async function prepareJob(options, deps, origin) {
   const jobPath = path.resolve(deps.cwd, options.job);
   const read = async (file, label, encoding) => {
     try {
@@ -233,7 +233,7 @@ async function prepareJob(options, deps) {
     deps.cwd,
     options.state ?? defaultStatePath(options.job),
   );
-  let state = emptyState();
+  let state = emptyState(origin);
   let stateExists = true;
   try {
     state = parseState(await deps.fs.readFile(statePath, "utf8"));
@@ -347,18 +347,16 @@ async function execute(argv, deps, document, secrets, log) {
   secrets.push(credentials.clientSecret, credentials.clientId);
 
   const prepared =
-    options.command === "check" ? undefined : await prepareJob(options, deps);
+    options.command === "check"
+      ? undefined
+      : await prepareJob(options, deps, document.url);
   // A post created at one address says nothing about another: a state made
   // against a local Worker must not make a run against the Console skip a post.
-  if (prepared) {
-    const { state, statePath } = prepared;
-    if (state.origin !== undefined && state.origin !== document.url)
-      throw new ClientError(
-        "state-mismatch",
-        `The state file (${statePath}) was made against ${state.origin} and this run goes to ${document.url}. Use another state file (--state).`,
-      );
-    state.origin = document.url;
-  }
+  if (prepared && prepared.state.origin !== document.url)
+    throw new ClientError(
+      "state-mismatch",
+      `The state file (${prepared.statePath}) was made against ${prepared.state.origin} and this run goes to ${document.url}. Use another state file (--state).`,
+    );
 
   const context = {
     fetch: deps.fetch,

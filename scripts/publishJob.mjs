@@ -619,9 +619,9 @@ const entrySchema = z
 
 const stateSchema = z.strictObject({
   version: z.literal(1),
-  // The Worker the state was made against. Missing in a state written before
-  // the client recorded it; such a state takes the address of the next run.
-  origin: z.string().min(1).optional(),
+  // The Worker the state was made against: a post created at one address says
+  // nothing about another, so a state without it cannot be used.
+  origin: z.string().min(1),
   channels: z.record(z.string().min(1), entrySchema),
 });
 
@@ -630,9 +630,12 @@ const stateSchema = z.strictObject({
  * @typedef {z.infer<typeof stateSchema>} State
  */
 
-/** @returns {State} */
-export function emptyState() {
-  return { version: 1, channels: {} };
+/**
+ * @param {string} origin the address of the Worker the run goes to
+ * @returns {State}
+ */
+export function emptyState(origin) {
+  return { version: 1, origin, channels: {} };
 }
 
 /**

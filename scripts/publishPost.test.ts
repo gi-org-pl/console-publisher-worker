@@ -1457,19 +1457,27 @@ describe("the state file", () => {
       expect(await readFile(statePath, "utf8")).toBe(elsewhere);
     });
 
-    it("takes a state without an address as its own", async () => {
+    it("refuses a state without an address and leaves it as it is", async () => {
       const job = await writeJob({ channels: ["linkedin"] });
       await client(["queue", job, "--send"]);
       const statePath = path.join(dir, "post.state.json");
       const { origin: _dropped, ...older } = JSON.parse(
         await readFile(statePath, "utf8"),
       );
-      await writeFile(statePath, JSON.stringify(older));
+      const without = JSON.stringify(older);
+      await writeFile(statePath, without);
+      seen = [];
 
       const { exitCode, document } = await client(["queue", job, "--send"]);
-      expect(exitCode).toBe(0);
-      expect(document.channels[0].outcome).toBe("already-created");
-      expect(JSON.parse(await readFile(statePath, "utf8")).origin).toBe(origin);
+      expect(exitCode).toBe(1);
+      expect(document.errors).toHaveLength(1);
+      expect(document.errors[0].code).toBe("invalid-state");
+      expect(document.errors[0].message).toMatch(
+        /^The state file is not a state of this client: origin: /,
+      );
+      expect(document.channels).toEqual([]);
+      expect(count()).toEqual({ session: 0, media: 0, posts: 0 });
+      expect(await readFile(statePath, "utf8")).toBe(without);
     });
   });
 

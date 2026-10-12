@@ -7,6 +7,7 @@ import {
   readFile,
   rename,
   rm,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
@@ -1718,17 +1719,54 @@ describe("the state file", () => {
       const later = calls.slice(1);
       expect(later.length).toBeGreaterThan(0);
       expect(later.length % 2).toBe(0);
+      const drafts = new Set<string>();
       for (let index = 0; index < later.length; index += 2) {
-        expect(later[index]).toBe(
-          'write post.state.json.tmp {"flag":"w","flush":true}',
-        );
-        expect(later[index + 1]).toBe(
-          "rename post.state.json.tmp -> post.state.json",
-        );
+        const draft = later[index].match(
+          /^write (post\.state\.json\.[0-9a-f-]{36}\.tmp) \{"flag":"wx","flush":true\}$/,
+        )?.[1];
+        expect(draft).toBeDefined();
+        expect(later[index + 1]).toBe(`rename ${draft} -> post.state.json`);
+        drafts.add(draft as string);
       }
-      expect(await readdir(dir)).not.toContain("post.state.json.tmp");
+      // Every write has a draft of its own, and none is left behind.
+      expect(drafts.size).toBe(later.length / 2);
+      expect(
+        (await readdir(dir)).filter((name) => name.endsWith(".tmp")),
+      ).toEqual([]);
       expect((await readState()).channels.li1.step).toBe("created");
       expect(JSON.parse(await readFile(statePath, "utf8")).version).toBe(1);
+    });
+
+    it("never writes through a file that waits under a predictable draft name", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      // What a link planted next to the state would point at.
+      const planted = path.join(dir, "post.state.json.tmp");
+      await writeFile(planted, "not the client's file");
+
+      const { exitCode } = await client(["queue", job, "--send"]);
+      expect(exitCode).toBe(0);
+      expect(await readFile(planted, "utf8")).toBe("not the client's file");
+      expect((await readState()).channels.li1.step).toBe("created");
+    });
+
+    it("clears away the draft of a write that failed", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      let writes = 0;
+      await client(["queue", job, "--send"], {
+        fs: {
+          readFile,
+          rename,
+          unlink,
+          writeFile: async (file: string, data: string, options: object) => {
+            if (++writes !== 3) return writeFile(file, data, options);
+            await writeFile(file, data.slice(0, 10), options);
+            throw Object.assign(new Error("killed"), { code: "EIO" });
+          },
+        },
+      });
+      expect(
+        (await readdir(dir)).filter((name) => name.endsWith(".tmp")),
+      ).toEqual([]);
     });
 
     it("keeps the last complete state when a write dies half-way", async () => {

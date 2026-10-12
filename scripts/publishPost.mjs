@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { sessionSchema, uploadSchema } from "../src/schemas/publishing.ts";
@@ -453,9 +453,18 @@ async function execute(argv, deps, document, secrets, log) {
       if (stateOnDisk) {
         // A later write replaces the file in one step: a run that dies in the
         // middle of it leaves the last complete state, not half of a new one.
-        const draft = `${statePath}.tmp`;
-        await deps.fs.writeFile(draft, data, { flag: "w", flush: true });
-        await deps.fs.rename(draft, statePath);
+        // The draft has a name nobody can prepare and is created exclusively,
+        // so a file or a link that is already there is never written through.
+        const draft = `${statePath}.${randomUUID()}.tmp`;
+        try {
+          await deps.fs.writeFile(draft, data, { flag: "wx", flush: true });
+          await deps.fs.rename(draft, statePath);
+        } catch (cause) {
+          // Only a draft this run made is cleared away.
+          if (cause?.code !== "EEXIST")
+            await deps.fs.unlink?.(draft)?.catch(() => {});
+          throw cause;
+        }
       } else {
         // The first write must not replace a file another run has just made.
         await deps.fs.writeFile(statePath, data, { flag: "wx" });
@@ -571,7 +580,7 @@ export async function run(argv, overrides = {}) {
   const deps = {
     env: process.env,
     fetch: globalThis.fetch,
-    fs: { readFile, rename, writeFile },
+    fs: { readFile, rename, unlink, writeFile },
     log: (line) => process.stderr.write(`${line}\n`),
     now: () => Date.now(),
     newId: () => randomUUID(),

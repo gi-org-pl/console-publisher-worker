@@ -200,7 +200,6 @@ async function prepareJob(options, deps, origin) {
   };
 
   const job = parseJob(await read(jobPath, "the job", "utf8"), options.command);
-  if (job.dueAt) checkDueAt(job.dueAt, deps.now());
 
   const directory = path.dirname(jobPath);
   const textFrom = async (file, label) =>
@@ -255,6 +254,10 @@ async function prepareJob(options, deps, origin) {
     }
     stateExists = false;
   }
+  // A job that was never run is held to its time before any request. One with
+  // a state may be run again after that time, to read what happened: its time
+  // is checked once it is known whether a channel would still be sent.
+  if (job.dueAt && !stateExists) checkDueAt(job.dueAt, deps.now());
   return { job, content, statePath, state, stateExists };
 }
 
@@ -427,6 +430,13 @@ async function execute(argv, deps, document, secrets, log) {
         .join(" "),
     );
   }
+
+  if (
+    job.dueAt &&
+    prepared.stateExists &&
+    plans.some((plan) => plan.action === "send")
+  )
+    checkDueAt(job.dueAt, deps.now());
 
   for (const plan of plans)
     state.channels[plan.channel.id] = Object.assign(plan.entry, {

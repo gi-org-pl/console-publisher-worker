@@ -1017,6 +1017,69 @@ describe("schedule", () => {
     });
   });
 
+  describe("when the job is run again after its time has passed", () => {
+    const later = (dueAt: string) => () => Date.parse(dueAt) + 60_000;
+
+    it("still reports the posts that were scheduled", async () => {
+      const dueAt = inMinutes(180);
+      const job = await writeJob({ dueAt });
+      const first = await client(["schedule", job, "--send"]);
+      expect(first.exitCode).toBe(0);
+      seen = [];
+
+      const second = await client(["schedule", job, "--send"], {
+        now: later(dueAt),
+      });
+      expect(second.exitCode).toBe(0);
+      expect(second.document.errors).toEqual([]);
+      expect(
+        second.document.channels.map(({ outcome, postId }) => ({
+          outcome,
+          postId,
+        })),
+      ).toEqual(
+        first.document.channels.map(({ postId }) => ({
+          outcome: "already-created",
+          postId,
+        })),
+      );
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+    });
+
+    it("still reports a post whose result is unknown", async () => {
+      const dueAt = inMinutes(180);
+      const job = await writeJob({ dueAt, channels: ["linkedin"] });
+      await client(["schedule", job]);
+      const state = await readState();
+      state.channels.li1.step = "posting";
+      await writeFile(path.join(dir, "post.state.json"), JSON.stringify(state));
+
+      const { exitCode, document } = await client(["schedule", job, "--send"], {
+        now: later(dueAt),
+      });
+      expect(exitCode).toBe(1);
+      expect(document.errors).toEqual([]);
+      expect(document.channels[0].outcome).toBe("unknown");
+    });
+
+    it("sends nothing to a channel that is still open", async () => {
+      const dueAt = inMinutes(180);
+      const job = await writeJob({ dueAt });
+      await client(["schedule", job]);
+      seen = [];
+
+      const { exitCode, document } = await client(["schedule", job, "--send"], {
+        now: later(dueAt),
+      });
+      expect(exitCode).toBe(1);
+      expect(document.errors).toHaveLength(1);
+      expect(document.errors[0].code).toBe("invalid-job");
+      expect(document.errors[0].message).toMatch(/is not in the future\.$/);
+      expect(document.channels).toEqual([]);
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+    });
+  });
+
   describe("when the time is inside the service's lead time", () => {
     it("reports the Worker's refusal for each channel and can be corrected", async () => {
       const job = await writeJob({ dueAt: inMinutes(10) });

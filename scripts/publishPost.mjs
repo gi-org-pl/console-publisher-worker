@@ -407,6 +407,25 @@ async function execute(argv, deps, document, secrets, log) {
   // Own entries only: an inherited name is never a channel's state.
   const stored = (id) =>
     Object.hasOwn(state.channels, id) ? state.channels[id] : undefined;
+  // A channel does not change its network. A session that lists a channel
+  // of this state under another one contradicts it: a network name in the
+  // job would mean other channels than it did when the state was made, so
+  // nothing is planned from such a session.
+  const moved = session.channels.filter((channel) => {
+    const before = stored(channel.id)?.service;
+    return before !== undefined && before !== channel.service;
+  });
+  if (moved.length > 0)
+    throw new ClientError(
+      "state-mismatch",
+      `The state file (${statePath}) has ${moved
+        .map((channel) => `${channel.id} as ${stored(channel.id).service}`)
+        .join(", ")}, and the session lists ${moved
+        .map((channel) => `${channel.id} as ${channel.service}`)
+        .join(
+          ", ",
+        )}. A channel does not change its network: fix the Worker's channel list, or use another state file (--state).`,
+    );
   // Channels of the first send that the session no longer lists. Nothing can
   // be sent to them, but what the state holds about them still belongs to the
   // job: a post that exists, one with no known result, one that never went

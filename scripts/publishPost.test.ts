@@ -2171,6 +2171,41 @@ describe("the state file", () => {
     });
   });
 
+  describe("when the session lists a channel of the state under another network", () => {
+    it.each([
+      ["a network", { channels: ["linkedin"] }],
+      ["every channel", {}],
+    ])("refuses the run for a job that names %s", async (_name, change) => {
+      const job = await writeJob(change);
+      const first = await client(["queue", job, "--send"]);
+      expect(first.exitCode).toBe(0);
+      const statePath = path.join(dir, "post.state.json");
+      const before = await readFile(statePath, "utf8");
+      env.CHANNELS_JSON = JSON.stringify([
+        { ...linkedin, service: "facebook" },
+        instagram,
+      ]);
+      seen = [];
+
+      for (const argv of [
+        ["queue", job, "--send"],
+        ["queue", job],
+      ]) {
+        const { exitCode, document } = await client(argv);
+        expect(exitCode).toBe(1);
+        expect(document.errors).toEqual([
+          {
+            code: "state-mismatch",
+            message: `The state file (${statePath}) has li1 as linkedin, and the session lists li1 as facebook. A channel does not change its network: fix the Worker's channel list, or use another state file (--state).`,
+          },
+        ]);
+        expect(document.channels).toEqual([]);
+      }
+      expect(count()).toEqual({ session: 2, media: 0, posts: 0 });
+      expect(await readFile(statePath, "utf8")).toBe(before);
+    });
+  });
+
   describe("when the session no longer lists a channel of the first send", () => {
     // LinkedIn leaves the session after the first run.
     const withoutLinkedin = () => {

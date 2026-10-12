@@ -1507,6 +1507,27 @@ describe("the state file", () => {
     });
   });
 
+  describe("when the session lists a channel whose ID is a name every object inherits", () => {
+    it.each([
+      "constructor",
+      "__proto__",
+    ])("sends nothing and writes no state for %s", async (id) => {
+      const job = await writeJob();
+      env.CHANNELS_JSON = JSON.stringify([{ ...linkedin, id }, instagram]);
+      const { exitCode, document } = await client(["queue", job, "--send"]);
+      expect(exitCode).toBe(1);
+      expect(document.errors).toEqual([
+        {
+          code: "unusable-channel",
+          message: `The session lists a channel whose ID cannot be a key of the state file: ${id}. Nothing is sent until the Worker's channel list is fixed.`,
+        },
+      ]);
+      expect(document.channels).toEqual([]);
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+      expect(await readdir(dir)).not.toContain("post.state.json");
+    });
+  });
+
   describe("when the session lists a channel twice", () => {
     it("sends nothing and says so", async () => {
       const job = await writeJob();

@@ -395,7 +395,14 @@ async function execute(argv, deps, document, secrets, log) {
       channel,
       text,
       image,
-      ...planEntry(state.channels[channel.id], digest, deps.newId),
+      // Own entries only: an inherited name is never a channel's state.
+      ...planEntry(
+        Object.hasOwn(state.channels, channel.id)
+          ? state.channels[channel.id]
+          : undefined,
+        digest,
+        deps.newId,
+      ),
     };
   });
 

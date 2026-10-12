@@ -441,6 +441,22 @@ describe("selectChannels", () => {
       );
     });
 
+    it.each([
+      "constructor",
+      "__proto__",
+      "toString",
+      "hasOwnProperty",
+    ])("refuses a session with the channel ID %s, a name every object inherits", (id) => {
+      const select = () =>
+        selectChannels(empty, [...channels, { ...channels[0], id }]);
+      expect(select).toThrow(
+        `The session lists a channel whose ID cannot be a key of the state file: ${id}. Nothing is sent until the Worker's channel list is fixed.`,
+      );
+      expect(select).toThrow(
+        expect.objectContaining({ code: "unusable-channel" }),
+      );
+    });
+
     it("refuses it also when the job does not select that channel", () => {
       expect(() =>
         selectChannels({ ...empty, channels: ["instagram"] }, twice),

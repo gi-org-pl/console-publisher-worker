@@ -1062,20 +1062,61 @@ describe("schedule", () => {
       expect(document.channels[0].outcome).toBe("unknown");
     });
 
-    it("sends nothing to a channel that is still open", async () => {
+    it.each([
+      [["schedule", "--send"]],
+      [["schedule"]],
+    ])("sends nothing to a channel that is still open (%j)", async ([
+      command,
+      ...flags
+    ]) => {
       const dueAt = inMinutes(180);
       const job = await writeJob({ dueAt });
       await client(["schedule", job]);
+      seen = [];
+
+      const { exitCode, document } = await client([command, job, ...flags], {
+        now: later(dueAt),
+      });
+      expect(exitCode).toBe(1);
+      expect(document.errors).toEqual([]);
+      expect(document.channels).toHaveLength(2);
+      for (const channel of document.channels) {
+        expect(channel.outcome).toBe("failed");
+        expect(channel.message).toMatch(
+          /^dueAt: .* is not in the future\. This channel was not sent\.$/,
+        );
+      }
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+    });
+
+    it("reports the channel that is done and holds back the one that is not", async () => {
+      const dueAt = inMinutes(180);
+      const job = await writeJob({ dueAt, channels: ["linkedin"] });
+      const first = await client(["schedule", job, "--send"]);
+      expect(first.exitCode).toBe(0);
+      // The same job, now for both channels: Instagram was never sent.
+      await writeJob({ dueAt });
       seen = [];
 
       const { exitCode, document } = await client(["schedule", job, "--send"], {
         now: later(dueAt),
       });
       expect(exitCode).toBe(1);
-      expect(document.errors).toHaveLength(1);
-      expect(document.errors[0].code).toBe("invalid-job");
-      expect(document.errors[0].message).toMatch(/is not in the future\.$/);
-      expect(document.channels).toEqual([]);
+      expect(document.errors).toEqual([]);
+      expect(document.channels).toEqual([
+        expect.objectContaining({
+          id: "li1",
+          outcome: "already-created",
+          postId: first.document.channels[0].postId,
+        }),
+        expect.objectContaining({
+          id: "ig1",
+          outcome: "failed",
+          message: expect.stringMatching(
+            /is not in the future\. This channel was not sent\.$/,
+          ),
+        }),
+      ]);
       expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
     });
   });

@@ -255,8 +255,8 @@ async function prepareJob(options, deps, origin) {
     stateExists = false;
   }
   // A job that was never run is held to its time before any request. One with
-  // a state may be run again after that time, to read what happened: its time
-  // is checked once it is known whether a channel would still be sent.
+  // a state may be run again after that time, to read what happened: there
+  // the time holds back only the channels that would still be sent.
   if (job.dueAt && !stateExists) checkDueAt(job.dueAt, deps.now());
   return { job, content, statePath, state, stateExists };
 }
@@ -431,12 +431,16 @@ async function execute(argv, deps, document, secrets, log) {
     );
   }
 
-  if (
-    job.dueAt &&
-    prepared.stateExists &&
-    plans.some((plan) => plan.action === "send")
-  )
-    checkDueAt(job.dueAt, deps.now());
+  // Why the time of this job no longer allows a send, if it does not. It
+  // stops the channels that are still open and none of the others.
+  let untimely;
+  if (job.dueAt && prepared.stateExists) {
+    try {
+      checkDueAt(job.dueAt, deps.now());
+    } catch (cause) {
+      untimely = cause.message;
+    }
+  }
 
   for (const plan of plans)
     state.channels[plan.channel.id] = Object.assign(plan.entry, {
@@ -489,6 +493,11 @@ async function execute(argv, deps, document, secrets, log) {
         message:
           entry.message ??
           `An earlier run sent this post and recorded no result. ${CHECK_BUFFER}`,
+      };
+    } else if (untimely) {
+      result = {
+        outcome: "failed",
+        message: `${untimely} This channel was not sent.`,
       };
     } else if (!options.send) {
       result = { outcome: "would-send" };

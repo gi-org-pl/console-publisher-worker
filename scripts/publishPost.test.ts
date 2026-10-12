@@ -967,6 +967,55 @@ describe("queue", () => {
       expect(seen).toHaveLength(0);
     });
 
+    describe("with a file that is not UTF-8", () => {
+      // "Zażółć" as Windows-1250 writes it.
+      const legacy = Buffer.from([0x5a, 0x61, 0xbf, 0xf3, 0xb3, 0xe6]);
+
+      it.each([
+        ["the job", "post.json", {}],
+        ["textFile", "post.txt", { text: undefined, textFile: "post.txt" }],
+        [
+          "channelTextFile.linkedin",
+          "linkedin.txt",
+          { channelTextFile: { linkedin: "linkedin.txt" } },
+        ],
+      ])("stops at %s before any request", async (label, file, change) => {
+        const job = await writeJob(change);
+        await writeFile(
+          path.join(dir, file),
+          file === job
+            ? Buffer.concat([
+                Buffer.from('{"image":"post.png","text":"'),
+                legacy,
+                Buffer.from('"}'),
+              ])
+            : legacy,
+        );
+
+        const { exitCode, document } = await client(["queue", job, "--send"]);
+        expect(exitCode).toBe(1);
+        expect(document.errors).toHaveLength(1);
+        expect(document.errors[0].code).toBe("invalid-job");
+        expect(document.errors[0].message).toMatch(
+          new RegExp(`^Cannot read ${label} .*: the file is not valid UTF-8$`),
+        );
+        expect(document.channels).toEqual([]);
+        expect(seen).toHaveLength(0);
+      });
+
+      it("sends a UTF-8 text file as it is, without its byte order mark", async () => {
+        const job = await writeJob({ text: undefined, textFile: "post.txt" });
+        await writeFile(
+          path.join(dir, "post.txt"),
+          "\uFEFFZażółć gęślą jaźń\r\n",
+        );
+
+        const { exitCode } = await client(["queue", job, "--send"]);
+        expect(exitCode).toBe(0);
+        expect(bufferPosts().at(-1).text).toBe("Zażółć gęślą jaźń");
+      });
+    });
+
     it("reports a job file that does not exist", async () => {
       const { document } = await client(["queue", "missing.json", "--send"]);
       expect(document.errors[0]).toMatchObject({ code: "invalid-job" });
@@ -1542,6 +1591,27 @@ describe("the state file", () => {
       expect(await readFile(path.join(dir, "post.state.json"), "utf8")).toBe(
         "{ not a state",
       );
+    });
+
+    it("never reads a state that is not UTF-8 as if it were", async () => {
+      const job = await writeJob();
+      const statePath = path.join(dir, "post.state.json");
+      await client(["queue", job]);
+      const broken = Buffer.concat([
+        await readFile(statePath),
+        Buffer.from([0xbf]),
+      ]);
+      await writeFile(statePath, broken);
+      seen = [];
+
+      const { exitCode, document } = await client(["queue", job, "--send"]);
+      expect(exitCode).toBe(1);
+      expect(document.errors[0].code).toBe("invalid-state");
+      expect(document.errors[0].message).toMatch(
+        /^Cannot read the state file .*: the file is not valid UTF-8$/,
+      );
+      expect(seen).toHaveLength(0);
+      expect(await readFile(statePath)).toEqual(broken);
     });
 
     it("reports a state that cannot be read", async () => {

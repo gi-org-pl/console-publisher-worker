@@ -185,12 +185,27 @@ async function openSession(context, credentials, log) {
   return { identity, channels };
 }
 
+const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/**
+ * Decodes a text file. Bytes that are not UTF-8 are an error: decoded
+ * leniently they would turn into replacement characters and go out as text.
+ */
+function decodeText(bytes) {
+  try {
+    return UTF8.decode(bytes);
+  } catch {
+    throw new Error("the file is not valid UTF-8");
+  }
+}
+
 /** Reads the job and every file it names; nothing leaves the machine here. */
 async function prepareJob(options, deps, origin) {
   const jobPath = path.resolve(deps.cwd, options.job);
-  const read = async (file, label, encoding) => {
+  const read = async (file, label, text = false) => {
     try {
-      return await deps.fs.readFile(file, encoding);
+      const bytes = await deps.fs.readFile(file);
+      return text ? decodeText(bytes) : bytes;
     } catch (cause) {
       throw new ClientError(
         "invalid-job",
@@ -199,11 +214,11 @@ async function prepareJob(options, deps, origin) {
     }
   };
 
-  const job = parseJob(await read(jobPath, "the job", "utf8"), options.command);
+  const job = parseJob(await read(jobPath, "the job", true), options.command);
 
   const directory = path.dirname(jobPath);
   const textFrom = async (file, label) =>
-    checkText(await read(path.resolve(directory, file), label, "utf8"), label);
+    checkText(await read(path.resolve(directory, file), label, true), label);
   const images = new Map();
   const imageFrom = async (file, label) => {
     const imagePath = path.resolve(directory, file);
@@ -242,7 +257,7 @@ async function prepareJob(options, deps, origin) {
   let state = emptyState(origin);
   let stateExists = true;
   try {
-    state = parseState(await deps.fs.readFile(statePath, "utf8"));
+    state = parseState(decodeText(await deps.fs.readFile(statePath)));
   } catch (cause) {
     if (cause?.code !== "ENOENT") {
       throw cause instanceof ClientError

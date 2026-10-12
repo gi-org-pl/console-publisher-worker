@@ -121,6 +121,98 @@ POST requests from an operator must carry `Origin` equal to `APP_ORIGIN`. This i
 
 References: [Workers Routes](https://developers.cloudflare.com/workers/configuration/routing/routes/), [Access path applications](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/), [Access JWT validation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/).
 
+## Queueing a post from the command line
+
+`scripts/queuePost.mjs` queues one post per channel as a service identity, from a job file. It runs on Node 24+ with the repository's dependencies installed and takes the request contract from the Worker's own schema.
+
+```sh
+node scripts/queuePost.mjs check
+node scripts/queuePost.mjs preview job.json
+node scripts/queuePost.mjs queue job.json
+```
+
+| Command | What it does |
+| --- | --- |
+| `check` | Asks for the session and prints the identity and its channels. |
+| `preview` | Reads the job, asks for the session and prints what each channel would get. Nothing is uploaded or posted. |
+| `queue` | Uploads the image and creates the posts in mode `addToQueue`. |
+
+There is no command for "now" and none for a chosen time. `--credential <name>` may be added to any of them, see [The token](#the-token). The script talks to `https://console.gi.org.pl` only and sends no `Origin` header.
+
+### The job
+
+```json
+{
+  "name": "autumn-news",
+  "text": "The text of the post.",
+  "image": "square.png",
+  "channels": ["linkedin", "instagram"],
+  "overrides": {
+    "instagram": { "text": "A text for Instagram.", "image": "portrait.png" }
+  }
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `name` | The name of the post: 3 to 64 lower-case letters, digits and hyphens. It decides what counts as the same post, see [A second run](#a-second-run). |
+| `text` | The text, as it goes out. |
+| `image` | A PNG of at most 5 MB, as a path inside the folder of the job. A path that leaves the folder is refused. |
+| `channels` | Optional. Channel IDs or network names; without it every channel of the session gets the post. |
+| `overrides` | Optional. A text, an image or both for one channel, by ID or by network. An ID comes before a network. |
+
+A key the script does not know, a channel the session does not have and a text the Worker would refuse stop the run before anything is uploaded.
+
+### A second run
+
+The script keeps no state. The request ID of a channel is derived from the name of the post, the channel and the Client ID, so every run of the same post sends the same IDs, and the Worker decides what happens: it reserves an ID before it calls Buffer and never creates a second post under it.
+
+| Outcome | Meaning |
+| --- | --- |
+| `would-send` | `preview`: the channel would get this text and image. |
+| `created` | The post is in the queue; `postId` is Buffer's ID. |
+| `already-sent` | The Worker has seen this request ID before (409) and created nothing. A post for this name and channel exists or may exist: look in Buffer. A changed text under the same name ends here too - a new post needs a new name. |
+| `refused` | The Worker turned the request down (`status`, `message`). Nothing was created. |
+| `failed` | The image was not uploaded, so nothing was posted. |
+| `unknown` | No usable answer to the post request. The post may exist: look in Buffer. Running the job again cannot create a second one. |
+
+After a run in which one channel was refused, run the same job again: the channels that have their post answer `already-sent`, the other one is created.
+
+The output is one JSON document on stdout: `ok`, `command`, `identity`, `name`, `channels` (each with `requestId`, `outcome` and, where they apply, `postId`, `status`, `message`, plus the `text` and `image` it got) and `errors` (`code`, `message`, and `status` for an HTTP answer). The exit code is 0 only when `ok` is true: no error, and every channel `created` or `would-send`.
+
+### The token
+
+The script takes the service token from the environment: `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. When they are not both set and `--credential <name>` is given, it reads the entry of that name from the credential store of the system.
+
+| System | Where | The entry |
+| --- | --- | --- |
+| Windows | Credential Manager > Windows Credentials > Add a generic credential | The address is `<name>`, the user name is the Client ID, the password is the Client Secret. |
+| macOS | The login Keychain, a generic password: `security add-generic-password -s <name> -a <Client ID> -w` (it asks for the password, so the secret is in no command line) | The service is `<name>`, the account is the Client ID, the password is the Client Secret. |
+
+On Windows the entry is read by `scripts/readCredential.ps1`, which the script starts itself. On macOS it is read with `/usr/bin/security`: the account first, and the password only when the account is a service token Client ID. The macOS path has not been run on a Mac yet.
+
+Both values of the token go into the two request headers and nowhere else: every text the script prints has them removed first, also when the other side repeats them, and a text of a job that contains them is refused.
+
+### Permission rule
+
+An operator who lets an agent run this script can allow looking without allowing sending. For Claude Code:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(node /path/to/console-publisher-worker/scripts/queuePost.mjs check:*)",
+      "Bash(node /path/to/console-publisher-worker/scripts/queuePost.mjs preview:*)"
+    ]
+  }
+}
+```
+
+Add the same line with `queue` to let the agent send without a question. Two things to know before doing that:
+
+- **The rule allows whatever is at that path.** Point it at a checkout the agent does not edit, by its full path. A rule with a relative path, in a folder the agent may write to, allows any code the agent puts there - with the token within its reach.
+- **`queue` has no way back.** A queued post goes out at the channel's next slot. What a service may publish at all stays limited by the Worker, see [Publishing restrictions](#publishing-restrictions).
+
 ## R2 and deployment
 
 Use Node 24+ and Yarn 1.22. Enable R2 in your Cloudflare account, then:

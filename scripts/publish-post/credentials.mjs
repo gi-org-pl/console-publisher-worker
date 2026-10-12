@@ -1,7 +1,7 @@
-import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { SERVICE_CLIENT_ID } from "../../src/schemas/publishing.ts";
 import { ClientError } from "./errors.mjs";
+import { readKeychain } from "./macosKeychain.mjs";
+import { readWindowsCredential } from "./windowsCredential.mjs";
 
 // Where the service token comes from: the environment, or the credential
 // store of the system. The caller puts both values into request headers and
@@ -41,77 +41,16 @@ export function checkCredentials(credentials, source) {
   return credentials;
 }
 
-/** The exit code of the credential script when the store has no such entry. */
-export const CREDENTIAL_NOT_FOUND = 3;
+/** The credential store of each system that has one this client can read. */
+const STORES = { win32: readWindowsCredential, darwin: readKeychain };
 
 /**
- * The process that reads a generic credential from the Windows credential
- * store. The name travels in the environment, never inside the script text.
- *
- * The script (`readCredential.ps1`, PowerShell with a declaration in C#) is
- * passed as an encoded command and not with `-File`: the default execution
- * policy of Windows does not run script files.
- * @param {string} name
+ * The credentials of a run: the environment first, then the store named with
+ * `--credential`.
+ * @param {{ credential?: string }} options
+ * @param {{ env: Record<string, string | undefined>, platform: string, runProcess: Function }} deps
+ * @returns {Promise<Credentials>}
  */
-export function credentialCommand(name) {
-  // The same text whatever line endings the checkout gave the file.
-  const script = readFileSync(
-    new URL("./readCredential.ps1", import.meta.url),
-    "utf8",
-  ).replaceAll("\r\n", "\n");
-  return {
-    file: "powershell",
-    args: [
-      "-NoProfile",
-      "-NonInteractive",
-      "-EncodedCommand",
-      Buffer.from(script, "utf16le").toString("base64"),
-    ],
-    env: { PUBLISH_POST_CREDENTIAL: name },
-  };
-}
-
-/**
- * @param {string} stdout what the credential script printed
- * @returns {Credentials}
- */
-export function parseCredentialOutput(stdout) {
-  try {
-    const { clientId, clientSecret } = JSON.parse(
-      Buffer.from(stdout.trim(), "base64").toString("utf8"),
-    );
-    if (typeof clientId === "string" && typeof clientSecret === "string")
-      return { clientId, clientSecret };
-  } catch {
-    // Reported below; the output may hold the secret and is never quoted.
-  }
-  throw new ClientError(
-    "credential-unavailable",
-    "The answer of the credential store could not be read.",
-  );
-}
-
-/**
- * Runs a program and returns its exit code and stdout, never its stderr.
- * @param {{ file: string, args: string[], env: Record<string, string> }} command
- * @returns {Promise<{ code: number, stdout: string }>}
- */
-export function runProcess({ file, args, env }) {
-  return new Promise((resolve) => {
-    execFile(
-      file,
-      args,
-      { env: { ...process.env, ...env }, windowsHide: true, timeout: 30_000 },
-      (error, stdout) =>
-        resolve({
-          code: error ? (typeof error.code === "number" ? error.code : -1) : 0,
-          stdout,
-        }),
-    );
-  });
-}
-
-/** The environment wins; the credential store is asked only without it. */
 export async function resolveCredentials(options, deps) {
   const fromEnvironment = credentialsFromEnvironment(deps.env);
   if (fromEnvironment)
@@ -123,30 +62,19 @@ export async function resolveCredentials(options, deps) {
     );
     throw new ClientError(
       "missing-credentials",
-      `Set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET${set.length === 1 ? ` (only ${set[0]} is set)` : ""}, or pass --credential <name> on Windows.`,
+      `Set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET${set.length === 1 ? ` (only ${set[0]} is set)` : ""}, or pass --credential <name> on Windows or macOS.`,
     );
   }
-  if (deps.platform !== "win32")
+  const read = Object.hasOwn(STORES, deps.platform)
+    ? STORES[deps.platform]
+    : undefined;
+  if (!read)
     throw new ClientError(
       "credential-unavailable",
-      "--credential reads the Windows credential store. On this system set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET.",
-    );
-
-  const { code, stdout } = await deps.runProcess(
-    credentialCommand(options.credential),
-  );
-  if (code === CREDENTIAL_NOT_FOUND)
-    throw new ClientError(
-      "credential-unavailable",
-      `The Windows credential store has no generic credential named "${options.credential}".`,
-    );
-  if (code !== 0)
-    throw new ClientError(
-      "credential-unavailable",
-      `Reading the Windows credential store failed (PowerShell exit code ${code}).`,
+      "--credential reads the Windows credential store or the macOS Keychain. On this system set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET.",
     );
   return checkCredentials(
-    parseCredentialOutput(stdout),
+    await read(options.credential, deps),
     `the credential "${options.credential}"`,
   );
 }

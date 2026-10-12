@@ -146,13 +146,26 @@ There is no command for `shareNow`. `queue` and `schedule` are separate commands
 | `--send` | Really upload the images and create the posts. |
 | `--state <file>` | The state file. Default: the job's path with `.state.json` in place of `.json`. |
 | `--url <origin>` | Another address of the Worker, for local development: `http://localhost:8787`. Default: `https://console.gi.org.pl`. Only that origin and loopback addresses (`localhost`, `127.0.0.1`, `[::1]`) are accepted, because the credentials are sent to it. |
-| `--credential <name>` | Windows only: the name of a generic credential in the Windows credential store that holds the service token. See below. |
+| `--credential <name>` | Windows and macOS: the name of the entry in the system's credential store that holds the service token. See below. |
 
 Relative paths in the arguments are relative to the current directory. The client sends the two Access headers and no `Origin` header, and does not follow redirects.
 
 ### Credentials
 
-The client takes the service token from the environment: `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. When they are not both set and `--credential <name>` is given, it reads the generic credential of that name from the Windows credential store (Credential Manager > Windows Credentials > Add a generic credential): the user name is the Client ID, the password is the Client Secret. Without either, the client fails with `missing-credentials` and sends nothing.
+The client takes the service token from the environment: `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. When they are not both set and `--credential <name>` is given, it reads the entry of that name from the credential store of the system. Without either, the client fails with `missing-credentials` and sends nothing. On a system with neither store, `--credential` fails with `credential-unavailable`.
+
+| System | Where | The entry |
+| --- | --- | --- |
+| Windows | Credential Manager > Windows Credentials > Add a generic credential | The address is `<name>`, the user name is the Client ID, the password is the Client Secret. |
+| macOS | The login Keychain, a generic password | The service is `<name>`, the account is the Client ID, the password is the Client Secret. |
+
+On macOS, create the entry in a terminal. With `-w` as the last option `security` asks for the password, so the secret is in no command line and no shell history:
+
+```sh
+security add-generic-password -s <name> -a <Client ID> -w
+```
+
+The client reads it with `/usr/bin/security`, first the account and then the password of that account. An entry whose account is not a service token Client ID is refused before its password is read. An entry created as above is readable by `security` without a question; for an entry made in Keychain Access, macOS may ask once whether `security` may read it, and a session without a screen cannot answer - the read then fails after 30 seconds with `credential-unavailable`.
 
 The secret is used for the request headers only. It is never printed, never written to the state file and never part of an error message: every text the client prints or writes has both values of the token removed first, also when a failed request or the other side repeats them. The credentials are resolved before the job is read, so this holds for an error about the job, its files or its state as well. Only an error about the arguments themselves comes earlier than a read of the credential store.
 
@@ -281,8 +294,9 @@ The rules match the start of the command, so they cover the job path, `--send` a
 | --- | --- |
 | `run.mjs` | The whole command, step by step, and the JSON document it returns. Start reading here. |
 | `arguments.mjs` | The command line: commands, options, the address the run goes to. |
-| `credentials.mjs` | Where the service token comes from: the environment or the credential store. |
-| `readCredential.ps1` | The PowerShell script that reads one entry of the Windows credential store. `credentials.mjs` starts it; it is not run by hand. |
+| `credentials.mjs` | Where the service token comes from: the environment, or the credential store of the system. |
+| `windowsCredential.mjs`, `readCredential.ps1` | The Windows credential store. The PowerShell script reads one entry; the module starts it, and it is not run by hand. |
+| `macosKeychain.mjs` | The macOS Keychain, read with the system's `security`. |
 | `job.mjs` | The job file and the files it names, checked against the Worker's limits. |
 | `state.mjs` | The state file: reading, planning one channel, writing. |
 | `worker.mjs` | The requests: the session, and the upload and the post of one channel. |
@@ -291,7 +305,7 @@ The rules match the start of the command, so they cover the job path, `--send` a
 | `plan.mjs` | What the run does with each channel, decided before anything is sent. |
 | `report.mjs` | What the document says about one channel. |
 | `redaction.mjs` | Removing both values of the token from every output. |
-| `digest.mjs`, `files.mjs`, `errors.mjs` | Fingerprints of the content, reading text files, the error the client reports. |
+| `digest.mjs`, `files.mjs`, `process.mjs`, `errors.mjs` | Fingerprints of the content, reading text files, starting the program of a credential store, the error the client reports. |
 
 Each module has its tests next to it (`job.mjs`, `job.test.ts`). The tests in `scripts/publish-post/tests/` run the whole client against the Worker's own code on `127.0.0.1`, with stand-ins for Access, R2 and Buffer (`workerStandIn.ts`), one file per subject: `check`, `queue`, `schedule`, the state file, the secret and so on. After every one of them, each output and each file the client wrote is searched for both values of the token.
 

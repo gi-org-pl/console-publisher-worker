@@ -94,59 +94,76 @@ export async function openSession(context, credentials, log) {
 }
 
 /**
- * Uploads and posts for one channel. The state is written before each request,
- * so a run that dies in the middle leaves a trace of how far it got.
+ * Keeps the state entry of a channel in step with what is sent for it.
+ * @param {import("./state.mjs").StateEntry} entry
+ * @param {() => Promise<void>} save
  */
-export async function sendChannel(plan, run) {
-  const { context, credentials, save, log } = run;
-  const { channel, entry } = plan;
-  const label = `${channel.service} (${channel.id})`;
+function track(entry, save) {
+  /** Where the channel stands now: the step and what belongs to it. */
   const set = (fields) => {
     for (const key of ["mediaId", "postId", "status", "message"])
       delete entry[key];
     Object.assign(entry, fields);
   };
-  // The step written before a request. When the write fails the request is
-  // not sent, so the step is taken back: a later write, of another channel,
-  // must not record a step this channel never reached.
-  const mark = async (fields) => {
-    const before = { ...entry };
-    set(fields);
-    try {
-      await save();
-    } catch (cause) {
-      for (const key of Object.keys(entry)) delete entry[key];
-      Object.assign(entry, before);
-      throw cause;
-    }
+  return {
+    set,
+    /**
+     * The step written before a request. When the write fails the request
+     * is not sent, so the step is taken back: a later write, of another
+     * channel, must not record a step this channel never reached.
+     */
+    async before(fields) {
+      const earlier = { ...entry };
+      set(fields);
+      try {
+        await save();
+      } catch (cause) {
+        for (const key of Object.keys(entry)) delete entry[key];
+        Object.assign(entry, earlier);
+        throw cause;
+      }
+    },
   };
+}
 
-  let { mediaId } = entry;
-  if (entry.step !== "uploaded" || !mediaId) {
-    await mark({ step: "uploading" });
-    const answer = await callWorker(
-      context,
-      buildUploadRequest(credentials, plan.image.bytes),
-    );
-    log(`${label}: upload ${answer.status || "no answer"}`);
-    const uploaded =
-      answer.status === 200 ? uploadSchema.safeParse(answer.data) : undefined;
-    if (!uploaded?.success) {
-      const outcome = isRefusal(answer.status) ? "refused" : "failed";
-      const failure = {
-        ...(answer.status ? { status: answer.status } : {}),
-        message: `Upload: ${answer.status === 200 ? "the Worker answered without a media ID." : answer.message}`,
-      };
-      set({ step: outcome, ...failure });
-      await save();
-      return { outcome, ...failure };
-    }
-    mediaId = uploaded.data.mediaId;
-    set({ step: "uploaded", mediaId });
-    await save();
+/**
+ * Uploads the image of a channel, unless an earlier run already did.
+ * @returns {Promise<{ mediaId: string } | { failure: object }>} the media ID,
+ *   or what to report when there is none
+ */
+async function uploadImage(plan, run, steps, label) {
+  const { entry } = plan;
+  if (entry.step === "uploaded" && entry.mediaId)
+    return { mediaId: entry.mediaId };
+
+  await steps.before({ step: "uploading" });
+  const answer = await callWorker(
+    run.context,
+    buildUploadRequest(run.credentials, plan.image.bytes),
+  );
+  run.log(`${label}: upload ${answer.status || "no answer"}`);
+  const uploaded =
+    answer.status === 200 ? uploadSchema.safeParse(answer.data) : undefined;
+  if (!uploaded?.success) {
+    const outcome = isRefusal(answer.status) ? "refused" : "failed";
+    const failure = {
+      ...(answer.status ? { status: answer.status } : {}),
+      message: `Upload: ${answer.status === 200 ? "the Worker answered without a media ID." : answer.message}`,
+    };
+    steps.set({ step: outcome, ...failure });
+    await run.save();
+    return { failure: { outcome, ...failure } };
   }
+  const { mediaId } = uploaded.data;
+  steps.set({ step: "uploaded", mediaId });
+  await run.save();
+  return { mediaId };
+}
 
-  const request = buildPostRequest(credentials, {
+/** Sends the post of a channel and records what came back. */
+async function createPost(plan, run, steps, label, mediaId) {
+  const { channel, entry } = plan;
+  const request = buildPostRequest(run.credentials, {
     requestId: entry.requestId,
     mediaId,
     channelId: channel.id,
@@ -154,20 +171,20 @@ export async function sendChannel(plan, run) {
     mode: run.mode,
     ...(run.dueAt ? { dueAt: run.dueAt } : {}),
   });
-  await mark({ step: "posting", mediaId });
-  const answer = await callWorker(context, request);
-  log(`${label}: post ${answer.status || "no answer"}`);
+  await steps.before({ step: "posting", mediaId });
+  const answer = await callWorker(run.context, request);
+  run.log(`${label}: post ${answer.status || "no answer"}`);
 
   const { outcome, ...result } = classifyPost(answer);
   if (result.status === 0) delete result.status;
   // An unknown result keeps the step at "posting", which blocks a repeat.
-  set({
+  steps.set({
     step: outcome === "unknown" ? "posting" : outcome,
     mediaId,
     ...result,
   });
   try {
-    await save();
+    await run.save();
   } catch (cause) {
     const error = {
       code: cause.code,
@@ -177,4 +194,21 @@ export async function sendChannel(plan, run) {
     run.unsaved.push(error);
   }
   return { outcome, ...result };
+}
+
+/**
+ * Uploads and posts for one channel. The state is written before each request,
+ * so a run that dies in the middle leaves a trace of how far it got.
+ * @param {import("./plan.mjs").ChannelPlan} plan
+ * @param {object} run the session's context, the credentials, the state
+ *   writer and the log of this run
+ */
+export async function sendChannel(plan, run) {
+  const { channel, entry } = plan;
+  const label = `${channel.service} (${channel.id})`;
+  const steps = track(entry, run.save);
+
+  const upload = await uploadImage(plan, run, steps, label);
+  if ("failure" in upload) return upload.failure;
+  return createPost(plan, run, steps, label, upload.mediaId);
 }

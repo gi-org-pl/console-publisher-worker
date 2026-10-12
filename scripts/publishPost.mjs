@@ -33,6 +33,7 @@ import {
   redactDeep,
   resolveBaseUrl,
   selectChannels,
+  selectsChannel,
   serializeState,
   sha256,
 } from "./publishJob.mjs";
@@ -352,10 +353,12 @@ async function sendChannel(plan, run) {
   try {
     await save();
   } catch (cause) {
-    run.errors.push({
+    const error = {
       code: cause.code,
       message: `${cause.message} The result of ${label} (${outcome}) is not in the state file: do not run this job again before the file is fixed.`,
-    });
+    };
+    run.errors.push(error);
+    run.unsaved.push(error);
   }
   return { outcome, ...result };
 }
@@ -401,7 +404,17 @@ async function execute(argv, deps, document, secrets, log) {
   if (job.dueAt) document.dueAt = job.dueAt;
   document.state = statePath;
 
-  const plans = selectChannels(job, session.channels).map((channel) => {
+  // Own entries only: an inherited name is never a channel's state.
+  const stored = (id) =>
+    Object.hasOwn(state.channels, id) ? state.channels[id] : undefined;
+  // Channels of the first send that the session no longer lists. Nothing can
+  // be sent to them, but what the state holds about them still belongs to the
+  // job: a post that exists, one with no known result, one that never went
+  // out. A run that left them out would call such a job done.
+  const absent = (state.targets ?? [])
+    .filter((id) => !session.channels.some((channel) => channel.id === id))
+    .map((id) => ({ id, service: stored(id)?.service }));
+  const planFor = (channel) => {
     const { text, image } = channelContent(content, channel);
     const digest = contentDigest({
       mode,
@@ -413,16 +426,15 @@ async function execute(argv, deps, document, secrets, log) {
       channel,
       text,
       image,
-      // Own entries only: an inherited name is never a channel's state.
-      ...planEntry(
-        Object.hasOwn(state.channels, channel.id)
-          ? state.channels[channel.id]
-          : undefined,
-        digest,
-        deps.newId,
-      ),
+      ...planEntry(stored(channel.id), digest, deps.newId),
     };
-  });
+  };
+  const plans = [
+    ...selectChannels(job, session.channels, absent).map(planFor),
+    ...absent
+      .filter((channel) => selectsChannel(job, channel))
+      .map((channel) => ({ ...planFor(channel), gone: true })),
+  ];
 
   const changed = plans.filter((plan) => plan.action === "changed");
   if (changed.length > 0) {
@@ -467,12 +479,18 @@ async function execute(argv, deps, document, secrets, log) {
   if (targets === null && options.send)
     state.targets = plans.map((plan) => plan.channel.id);
 
+  // What would go out in this run, were it a run that sends.
+  const isOpen = (plan) =>
+    plan.action === "send" && !plan.gone && !isLate(plan);
+
   for (const plan of plans)
-    if (!isLate(plan))
+    if (!plan.gone && !isLate(plan))
       state.channels[plan.channel.id] = Object.assign(plan.entry, {
         service: plan.channel.service,
       });
   let stateOnDisk = prepared.stateExists;
+  // The errors of results that are not in the state file yet.
+  const unsaved = [];
   const save = async () => {
     try {
       const data = serializeState(redactDeep(state, secrets));
@@ -504,16 +522,16 @@ async function execute(argv, deps, document, secrets, log) {
           : `Cannot write the state file (${statePath}): ${cause.code ?? cause.message}.`,
       );
     }
+    // Every write is the whole state, so this one holds the results an
+    // earlier write failed to record: what was said about them is taken back.
+    for (const error of unsaved.splice(0))
+      document.errors.splice(document.errors.indexOf(error), 1);
   };
   // The state is written before anything is planned to go out, so the request
   // IDs a dry run prints are the ones a later send uses. A run in which no
   // channel would be sent has nothing new to record: it reports what the
   // state holds, also from a disk that cannot be written.
-  if (
-    !untimely &&
-    plans.some((plan) => plan.action === "send" && !isLate(plan))
-  )
-    await save();
+  if (!untimely && plans.some(isOpen)) await save();
 
   const run = {
     context,
@@ -523,6 +541,7 @@ async function execute(argv, deps, document, secrets, log) {
     mode,
     dueAt: job.dueAt,
     errors: document.errors,
+    unsaved,
   };
   for (const plan of plans) {
     const { channel, entry } = plan;
@@ -536,6 +555,13 @@ async function execute(argv, deps, document, secrets, log) {
         message:
           entry.message ??
           `An earlier run sent this post and recorded no result. ${CHECK_BUFFER}`,
+      };
+    } else if (plan.gone) {
+      const last = stored(channel.id);
+      result = {
+        outcome: "failed",
+        ...(last?.status ? { status: last.status } : {}),
+        message: `The session no longer lists this channel, so it was not sent. ${last ? `Its last recorded step is "${last.step}".` : "The state file has no entry for it."}`,
       };
     } else if (isLate(plan)) {
       result = {
@@ -560,17 +586,25 @@ async function execute(argv, deps, document, secrets, log) {
         };
       }
     }
+    // A channel that is held back for good has no request of its own, and one
+    // the session no longer lists has only what the state holds.
+    const requestId = isLate(plan)
+      ? undefined
+      : (plan.gone ? stored(channel.id) : entry)?.requestId;
     document.channels.push({
       id: channel.id,
-      name: channel.name,
-      service: channel.service,
-      // A channel that is held back for good has no request of its own.
-      ...(isLate(plan) ? {} : { requestId: entry.requestId }),
+      // Not known for a channel the session no longer lists.
+      ...(channel.name ? { name: channel.name } : {}),
+      ...(channel.service ? { service: channel.service } : {}),
+      ...(requestId ? { requestId } : {}),
       ...result,
       text: plan.text,
       image: plan.image.path,
     });
   }
+  // One more try for a result the file still lacks, now that nothing else is
+  // left to send. When it fails too, the error stays as it was reported.
+  if (unsaved.length > 0) await save().catch(() => {});
   if (!options.send) log("dry run: nothing was sent; pass --send to send");
 }
 
@@ -579,8 +613,8 @@ async function execute(argv, deps, document, secrets, log) {
  * `queue` and `schedule` add what happened to each selected one.
  * @typedef {object} ChannelReport
  * @property {string} id
- * @property {string} name
- * @property {string} service
+ * @property {string} [name]
+ * @property {string} [service]
  * @property {string} [requestId]
  * @property {"would-send" | "created" | "already-created" | "refused" | "failed" | "unknown"} [outcome]
  * @property {string} [postId]

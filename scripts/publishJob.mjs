@@ -271,16 +271,29 @@ function findOverride(values, channel) {
   return undefined;
 }
 
+/** @param {string} key a channel ID or a network name, as a job writes it */
+const matches = (key, channel) => channel.id === key || channel.service === key;
+
+/**
+ * Whether the job means this channel: every channel when it names none.
+ * @param {{ channels?: string[] }} job
+ * @param {{ id: string, service?: string }} channel
+ */
+export function selectsChannel(job, channel) {
+  return !job.channels || job.channels.some((key) => matches(key, channel));
+}
+
 /**
  * The session's channels this job posts to. A name that matches nothing is a
  * mistake in the job, so nothing is sent until it is fixed.
  * @param {{ channels?: string[], channelText: object, channelTextFile: object, channelImage: object }} job
  * @param {Channel[]} available
+ * @param {{ id: string, service?: string }[]} [absent] channels of an earlier
+ *   send that the session no longer lists. A name in the job may still mean
+ *   one of them, so it is no mistake; they are never among the result.
  * @returns {Channel[]}
  */
-export function selectChannels(job, available) {
-  const matches = (key, channel) =>
-    channel.id === key || channel.service === key;
+export function selectChannels(job, available, absent = []) {
   // The state keeps one entry per channel id. An id listed twice would get two
   // request ids and two posts, so a session like that is refused as a whole.
   const repeated = available
@@ -308,15 +321,19 @@ export function selectChannels(job, available) {
   if (job.channels) {
     const wanted = job.channels;
     for (const key of wanted)
-      if (!available.some((channel) => matches(key, channel)))
+      if (![...available, ...absent].some((channel) => matches(key, channel)))
         problems.push(`channels: "${key}" is not a channel of this session`);
     selected = available.filter((channel) =>
       wanted.some((key) => matches(key, channel)),
     );
   }
+  const meant = [
+    ...selected,
+    ...absent.filter((channel) => selectsChannel(job, channel)),
+  ];
   for (const name of ["channelText", "channelTextFile", "channelImage"])
     for (const key of Object.keys(job[name]))
-      if (!selected.some((channel) => matches(key, channel)))
+      if (!meant.some((channel) => matches(key, channel)))
         problems.push(`${name}: "${key}" matches no selected channel`);
 
   if (problems.length > 0)

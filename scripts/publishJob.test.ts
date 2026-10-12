@@ -36,6 +36,7 @@ import {
   redactDeep,
   resolveBaseUrl,
   selectChannels,
+  selectsChannel,
   serializeState,
   sha256,
 } from "./publishJob.mjs";
@@ -423,6 +424,57 @@ describe("selectChannels", () => {
       );
       expect(select).toThrow(
         expect.objectContaining({ code: "unknown-channel" }),
+      );
+    });
+  });
+
+  describe("when a channel of an earlier send left the session", () => {
+    const left = [{ id: "th1", service: "threads" }];
+
+    it.each([
+      [{ channels: ["threads", "linkedin"] }],
+      [{ channels: ["th1", "linkedin"] }],
+      [{ channels: ["th1", "linkedin"], channelText: { threads: "a" } }],
+      [{ channelImage: { th1: "c.png" } }],
+    ])("takes %j for no mistake and never selects that channel", (job) => {
+      const selected = selectChannels({ ...empty, ...job }, channels, left);
+      expect(selected.map((channel) => channel.id)).not.toContain("th1");
+      expect(selected.map((channel) => channel.id)).toContain("li1");
+    });
+
+    it("still refuses its text when the job no longer means the channel", () => {
+      expect(() =>
+        selectChannels(
+          { ...empty, channels: ["linkedin"], channelText: { threads: "a" } },
+          channels,
+          left,
+        ),
+      ).toThrow('channelText: "threads" matches no selected channel');
+    });
+
+    it("still refuses a name that neither the session nor that send knows", () => {
+      expect(() =>
+        selectChannels({ ...empty, channels: ["tiktok"] }, channels, left),
+      ).toThrow('channels: "tiktok" is not a channel of this session');
+    });
+  });
+
+  describe("selectsChannel", () => {
+    it.each([
+      [undefined, true],
+      [["threads"], true],
+      [["th1"], true],
+      [["linkedin"], false],
+    ])("with channels %j says %s", (wanted, expected) => {
+      expect(
+        selectsChannel({ channels: wanted }, { id: "th1", service: "threads" }),
+      ).toBe(expected);
+    });
+
+    it("matches a channel without a known network by its ID only", () => {
+      expect(selectsChannel({ channels: ["th1"] }, { id: "th1" })).toBe(true);
+      expect(selectsChannel({ channels: ["threads"] }, { id: "th1" })).toBe(
+        false,
       );
     });
   });

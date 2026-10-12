@@ -2124,6 +2124,209 @@ describe("the state file", () => {
         /ENOSPC\. The result of linkedin \(li1\) \(created\) is not in the state file: do not run this job again before the file is fixed\.$/,
       );
     });
+
+    // The fifth write of a run is the result of its first channel.
+    const failingOnce = (failAt: number) => {
+      let writes = 0;
+      return {
+        readFile,
+        rename,
+        unlink,
+        writeFile: async (file: string, data: string, options: object) => {
+          if (++writes === failAt)
+            throw Object.assign(new Error("busy"), { code: "EBUSY" });
+          return writeFile(file, data, options);
+        },
+      };
+    };
+
+    it.each([
+      ["a later channel's write", {}, ["li1", "ig1"]],
+      ["the last try of the run", { channels: ["linkedin"] }, ["li1"]],
+    ])("takes the error back once %s has recorded the result", async (_name, change, ids) => {
+      const job = await writeJob(change);
+      const { exitCode, document } = await client(["queue", job, "--send"], {
+        fs: failingOnce(5),
+      });
+      expect(document.errors).toEqual([]);
+      expect(exitCode).toBe(0);
+      expect(document.ok).toBe(true);
+      const state = await readState();
+      for (const [index, id] of ids.entries()) {
+        expect(document.channels[index]).toMatchObject({
+          id,
+          outcome: "created",
+        });
+        expect(state.channels[id]).toMatchObject({
+          step: "created",
+          postId: document.channels[index].postId,
+        });
+      }
+
+      // The file is whole: a second run sends nothing.
+      seen = [];
+      const again = await client(["queue", job, "--send"]);
+      expect(again.exitCode).toBe(0);
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+    });
+  });
+
+  describe("when the session no longer lists a channel of the first send", () => {
+    // LinkedIn leaves the session after the first run.
+    const withoutLinkedin = () => {
+      env.CHANNELS_JSON = JSON.stringify([instagram]);
+      seen = [];
+    };
+    const notSent = (step: string) =>
+      `The session no longer lists this channel, so it was not sent. Its last recorded step is "${step}".`;
+
+    it.each([
+      ["every channel", {}],
+      ["networks", { channels: ["linkedin", "instagram"] }],
+      ["channel IDs", { channels: ["li1", "ig1"] }],
+      [
+        "a text for the channel that left",
+        { channelText: { linkedin: "For LinkedIn" } },
+      ],
+    ])("still reports its post for a job that names %s", async (_name, change) => {
+      const job = await writeJob(change);
+      const first = await client(["queue", job, "--send"]);
+      expect(first.exitCode).toBe(0);
+      const before = await readFile(path.join(dir, "post.state.json"), "utf8");
+      withoutLinkedin();
+
+      for (const argv of [
+        ["queue", job, "--send"],
+        ["queue", job],
+      ]) {
+        const again = await client(argv);
+        expect(again.document.errors).toEqual([]);
+        expect(again.exitCode).toBe(0);
+        expect(again.document.channels).toEqual([
+          expect.objectContaining({
+            id: "ig1",
+            name: instagram.name,
+            outcome: "already-created",
+            postId: first.document.channels[1].postId,
+          }),
+          expect.objectContaining({
+            id: "li1",
+            service: "linkedin",
+            requestId: first.document.channels[0].requestId,
+            outcome: "already-created",
+            postId: first.document.channels[0].postId,
+          }),
+        ]);
+        expect(again.document.channels[1]).not.toHaveProperty("name");
+      }
+      expect(count()).toEqual({ session: 2, media: 0, posts: 0 });
+      expect(await readFile(path.join(dir, "post.state.json"), "utf8")).toBe(
+        before,
+      );
+    });
+
+    it("does not call a job done whose channel was refused and then left", async () => {
+      const job = await writeJob();
+      // LinkedIn leaves the allowlist after the session listed it.
+      afterAnswer = (request) => {
+        if (request.path === "/api/buffer/session")
+          env.CHANNELS_JSON = JSON.stringify([instagram]);
+      };
+      const first = await client(["queue", job, "--send"]);
+      expect(outcomes(first.document.channels)).toEqual({
+        li1: "refused",
+        ig1: "created",
+      });
+      afterAnswer = () => {};
+      const before = await readFile(path.join(dir, "post.state.json"), "utf8");
+      withoutLinkedin();
+
+      const again = await client(["queue", job, "--send"]);
+      expect(again.exitCode).toBe(1);
+      expect(again.document.ok).toBe(false);
+      expect(again.document.channels).toEqual([
+        expect.objectContaining({ id: "ig1", outcome: "already-created" }),
+        expect.objectContaining({
+          id: "li1",
+          requestId: first.document.channels[0].requestId,
+          outcome: "failed",
+          status: 403,
+          message: notSent("refused"),
+        }),
+      ]);
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+      expect(await readFile(path.join(dir, "post.state.json"), "utf8")).toBe(
+        before,
+      );
+
+      // Back in the session, it goes out with the request ID it had.
+      env.CHANNELS_JSON = JSON.stringify([linkedin, instagram]);
+      const back = await client(["queue", job, "--send"]);
+      expect(back.exitCode).toBe(0);
+      expect(back.document.channels[0]).toMatchObject({
+        id: "li1",
+        requestId: first.document.channels[0].requestId,
+        outcome: "created",
+      });
+    });
+
+    it("keeps pointing at a post with no known result", async () => {
+      const job = await writeJob();
+      await client(["queue", job, "--send"]);
+      const state = await readState();
+      const { postId: _postId, ...sent } = state.channels.li1;
+      state.channels.li1 = { ...sent, step: "posting" };
+      await writeFile(path.join(dir, "post.state.json"), JSON.stringify(state));
+      withoutLinkedin();
+
+      const again = await client(["queue", job, "--send"]);
+      expect(again.exitCode).toBe(1);
+      expect(again.document.channels[1]).toMatchObject({
+        id: "li1",
+        outcome: "unknown",
+        message: `An earlier run sent this post and recorded no result. ${CHECK_BUFFER}`,
+      });
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+    });
+
+    it("refuses a job that changed after the post of such a channel was created", async () => {
+      const job = await writeJob();
+      await client(["queue", job, "--send"]);
+      await writeJob({ text: "Another text" });
+      withoutLinkedin();
+
+      const { exitCode, document } = await client(["queue", job, "--send"]);
+      expect(exitCode).toBe(1);
+      expect(document.errors[0].code).toBe("state-mismatch");
+      expect(document.errors[0].message).toMatch(
+        /^The job changed after a post was created for instagram \(ig1\), linkedin \(li1\)\./,
+      );
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+    });
+
+    it("leaves the channel out when the job no longer means it", async () => {
+      const job = await writeJob();
+      await client(["queue", job, "--send"]);
+      await writeJob({ channels: ["instagram"] });
+      withoutLinkedin();
+
+      const { exitCode, document } = await client(["queue", job, "--send"]);
+      expect(exitCode).toBe(0);
+      expect(outcomes(document.channels)).toEqual({ ig1: "already-created" });
+    });
+
+    it("still refuses a name that means no channel at all", async () => {
+      const job = await writeJob();
+      await client(["queue", job, "--send"]);
+      await writeJob({ channels: ["linkedin", "threads"] });
+      withoutLinkedin();
+
+      const { document } = await client(["queue", job, "--send"]);
+      expect(document.errors[0].code).toBe("unknown-channel");
+      expect(document.errors[0].message).toMatch(
+        /^channels: "threads" is not a channel of this session\. /,
+      );
+    });
   });
 });
 

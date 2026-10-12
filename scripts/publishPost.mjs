@@ -410,9 +410,12 @@ async function execute(argv, deps, document, secrets, log) {
   // A channel does not change its network. A session that lists a channel
   // of this state under another one contradicts it: a network name in the
   // job would mean other channels than it did when the state was made, so
-  // nothing is planned from such a session.
+  // nothing is planned from such a session. This holds for the channels of
+  // a send only: what a dry run wrote down is replaced by the next plan.
   const moved = session.channels.filter((channel) => {
-    const before = stored(channel.id)?.service;
+    const before = state.targets?.includes(channel.id)
+      ? stored(channel.id)?.service
+      : undefined;
     return before !== undefined && before !== channel.service;
   });
   if (moved.length > 0)

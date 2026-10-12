@@ -169,6 +169,7 @@ async function readState(name = "post.state.json") {
     channels: Record<
       string,
       {
+        service?: string;
         requestId: string;
         step: string;
         mediaId?: string;
@@ -2203,6 +2204,54 @@ describe("the state file", () => {
       }
       expect(count()).toEqual({ session: 2, media: 0, posts: 0 });
       expect(await readFile(statePath, "utf8")).toBe(before);
+    });
+  });
+
+  describe("when the session corrects the network of a channel that was never sent", () => {
+    const relabel = () => {
+      env.CHANNELS_JSON = JSON.stringify([
+        { ...linkedin, service: "facebook" },
+        instagram,
+      ]);
+      seen = [];
+    };
+
+    it("sends a job that only had dry runs, under the network of the session", async () => {
+      const job = await writeJob();
+      const dry = await client(["queue", job]);
+      expect((await readState()).channels.li1.service).toBe("linkedin");
+      relabel();
+
+      const sent = await client(["queue", job, "--send"]);
+      expect(sent.document.errors).toEqual([]);
+      expect(sent.exitCode).toBe(0);
+      expect(sent.document.channels[0]).toMatchObject({
+        id: "li1",
+        service: "facebook",
+        requestId: dry.document.channels[0].requestId,
+        outcome: "created",
+      });
+      expect((await readState()).channels.li1.service).toBe("facebook");
+    });
+
+    it("takes no notice of an entry a dry run left for a channel outside the send", async () => {
+      const job = await writeJob();
+      await client(["queue", job]);
+      await writeJob({ channels: ["instagram"] });
+      const sent = await client(["queue", job, "--send"]);
+      expect(sent.exitCode).toBe(0);
+      const state = await readState();
+      expect(state.targets).toEqual(["ig1"]);
+      expect(state.channels.li1.service).toBe("linkedin");
+      relabel();
+
+      const again = await client(["queue", job, "--send"]);
+      expect(again.document.errors).toEqual([]);
+      expect(again.exitCode).toBe(0);
+      expect(outcomes(again.document.channels)).toEqual({
+        ig1: "already-created",
+      });
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
     });
   });
 

@@ -1,7 +1,9 @@
 import {
   MIN_SCHEDULE_LEAD_MS,
+  type PostType,
   type PublishInput,
   SERVICE_MODES,
+  SERVICE_POST_TYPES,
 } from "../schemas/publishing";
 import type { Channel, Operator } from "./types";
 
@@ -31,6 +33,14 @@ export function modeAllowed(
   return (
     operator.kind === "user" ||
     (SERVICE_MODES as readonly string[]).includes(mode)
+  );
+}
+
+/** An allowlist as well: a new kind of post stays with people until it is listed. */
+export function postTypeAllowed(operator: Operator, type: PostType): boolean {
+  return (
+    operator.kind === "user" ||
+    (SERVICE_POST_TYPES as readonly string[]).includes(type)
   );
 }
 

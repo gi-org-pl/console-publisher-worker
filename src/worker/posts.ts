@@ -4,13 +4,14 @@ import {
   MIN_SCHEDULE_LEAD_MS,
   type PublishInput,
   postMediaIds,
+  postType,
   publishInputSchema,
 } from "../schemas/publishing";
-import { createBufferPost, maxImages } from "./buffer";
+import { createBufferPost, hasStories, maxImages } from "./buffer";
 import { error, json, readLimited } from "./http";
 import { actorFields, logError, logEvent } from "./log";
 import { imageKey } from "./media";
-import { minScheduleLeadMs, modeAllowed } from "./policy";
+import { minScheduleLeadMs, modeAllowed, postTypeAllowed } from "./policy";
 import type { Channel, Env, Operator } from "./types";
 
 const MAX_BODY_BYTES = 24_000;
@@ -154,6 +155,12 @@ export async function createPost(
     return error("A service may only queue or schedule a post.", 403);
   }
 
+  const type = postType(input);
+  if (!postTypeAllowed(operator, type)) {
+    serviceDenied(operator, input, "Post type not allowed for a service");
+    return error("A service may not create a story.", 403);
+  }
+
   const channel = channels.find((entry) => entry.id === input.channelId);
   if (!channel) {
     serviceDenied(operator, input, "Channel not allowed");
@@ -166,13 +173,19 @@ export async function createPost(
     return schedule;
   }
 
+  if (type === "story" && !hasStories(channel)) {
+    return error("This channel has no stories.", 400);
+  }
+
   const mediaIds = postMediaIds(input);
-  const limit = maxImages(channel);
+  const limit = maxImages(channel, type);
   if (mediaIds.length > limit) {
     return error(
-      limit === 1
-        ? "This channel takes one image in a post."
-        : `This channel takes at most ${limit} images in a post.`,
+      type === "story"
+        ? "A story takes one image."
+        : limit === 1
+          ? "This channel takes one image in a post."
+          : `This channel takes at most ${limit} images in a post.`,
       400,
     );
   }

@@ -9,6 +9,13 @@ export const MAX_SCHEDULE_DAYS = 30;
  * takes the most; the limit of each network is checked by the Worker.
  */
 export const MAX_IMAGES_PER_POST = 20;
+/** What a post can be published as. A story is there for a day and shows no caption. */
+export const POST_TYPES = ["post", "story"] as const;
+/**
+ * The only post types a service may create. A type added later is closed to
+ * services until it is listed here.
+ */
+export const SERVICE_POST_TYPES = ["post"] as const;
 /** The only modes a service may use. Publishing immediately stays with a person. */
 export const SERVICE_MODES = ["addToQueue", "customScheduled"] as const;
 /** Time for a person to pull a service's scheduled post back in Buffer. */
@@ -60,11 +67,18 @@ export const publishInputSchema = z
     mediaId: z.uuid().optional(),
     mediaIds: z.array(z.uuid()).min(1).max(MAX_IMAGES_PER_POST).optional(),
     channelId: z.string().min(1),
-    text: z.string().trim().min(1).max(5000),
+    /** Left out for a story, which shows no caption; required for a post. */
+    text: z.string().trim().min(1).max(5000).optional(),
+    /** Left out means "post". */
+    type: z.enum(POST_TYPES).optional(),
     mode: z.enum(["addToQueue", "shareNow", "customScheduled"]),
     dueAt: z.iso.datetime().optional(),
   })
   .strict()
+  .refine((input) => (input.type === "story") === (input.text === undefined), {
+    message: "A post needs a text; a story is sent without one.",
+    path: ["text"],
+  })
   .refine(
     (input) => (input.mediaId === undefined) !== (input.mediaIds === undefined),
     { message: 'Give either "mediaId" or "mediaIds".' },
@@ -89,6 +103,12 @@ export const bufferResultSchema = z.object({
 });
 export type PublishingSession = z.infer<typeof sessionSchema>;
 export type PublishInput = z.infer<typeof publishInputSchema>;
+
+export type PostType = (typeof POST_TYPES)[number];
+
+export function postType(input: PublishInput): PostType {
+  return input.type ?? "post";
+}
 
 /** The images of a post, in the order they are shown. */
 export function postMediaIds(input: PublishInput): string[] {

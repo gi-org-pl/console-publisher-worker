@@ -2415,6 +2415,50 @@ describe("the state file", () => {
 });
 
 describe("the secret", () => {
+  describe("when a text of the job holds a credential of the service", () => {
+    it.each([
+      [
+        "the Client Secret in the text",
+        { text: `Our key is ${clientSecret}, enjoy` },
+        "text contains the Client Secret of this service",
+      ],
+      [
+        "the Client ID in a text file",
+        { text: undefined, textFile: "post.txt" },
+        "text contains the Client ID of this service",
+      ],
+      [
+        "both in the text for one channel",
+        { channelText: { linkedin: `${clientId} ${clientSecret}` } },
+        "the text for linkedin contains the Client Secret of this service; the text for linkedin contains the Client ID of this service",
+      ],
+    ])("stops at %s before any request", async (_name, change, found) => {
+      const job = await writeJob(change);
+      await writeFile(path.join(dir, "post.txt"), `Reach us as ${clientId}`);
+
+      for (const argv of [
+        ["queue", job, "--send"],
+        ["queue", job],
+      ]) {
+        const { exitCode, document } = await client(argv);
+        expect(exitCode).toBe(1);
+        expect(document.errors).toEqual([
+          {
+            code: "invalid-job",
+            message: `${found}. Nothing was sent: take it out of the text, and replace the credential if the text was shown to anyone.`,
+          },
+        ]);
+        expect(document.channels).toEqual([]);
+      }
+      expect(seen).toHaveLength(0);
+      expect(await readdir(dir)).not.toContain("post.state.json");
+      // The files of this test hold the values on purpose; the check after
+      // each test is about what the client wrote.
+      await rm(path.join(dir, job));
+      await rm(path.join(dir, "post.txt"));
+    });
+  });
+
   const leaking = (failAt: string): typeof fetch => {
     return async (input, init) => {
       if ((input as URL).pathname === failAt)

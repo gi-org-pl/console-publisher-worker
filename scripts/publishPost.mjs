@@ -378,6 +378,31 @@ async function execute(argv, deps, document, secrets, log) {
     options.command === "check"
       ? undefined
       : await prepareJob(options, deps, document.url);
+  // A text goes to the Worker and on to a public channel as it is. One that
+  // holds a credential of this service would publish it - and the report,
+  // which is cleared of both values, would not even show where it was.
+  if (prepared) {
+    const { text, channelText } = prepared.content;
+    const found = [
+      ["text", text],
+      ...Object.entries(channelText).map(([key, value]) => [
+        `the text for ${key}`,
+        value,
+      ]),
+    ].flatMap(([label, value]) =>
+      [
+        ["Client Secret", credentials.clientSecret],
+        ["Client ID", credentials.clientId],
+      ]
+        .filter(([, credential]) => value.includes(credential))
+        .map(([name]) => `${label} contains the ${name} of this service`),
+    );
+    if (found.length > 0)
+      throw new ClientError(
+        "invalid-job",
+        `${found.join("; ")}. Nothing was sent: take it out of the text, and replace the credential if the text was shown to anyone.`,
+      );
+  }
   // A post created at one address says nothing about another: a state made
   // against a local Worker must not make a run against the Console skip a post.
   if (prepared && prepared.state.origin !== document.url)

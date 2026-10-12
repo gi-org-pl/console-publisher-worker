@@ -171,7 +171,7 @@ The secret is used for the request headers only. It is never printed, never writ
 
 | Key | Meaning |
 | --- | --- |
-| `text` or `textFile` | The text of the post, inline or as a UTF-8 file. Exactly one of the two. The job and every text file it names must be UTF-8: a file in another encoding (Windows-1250, for example) is refused with `invalid-job`, never sent with its letters replaced. |
+| `text` or `textFile` | The text of the post, inline or as a UTF-8 file. Exactly one of the two. A text that contains the Client ID or the Client Secret the run uses is refused with `invalid-job` before any request, since it would be published as it is. The job and every text file it names must be UTF-8: a file in another encoding (Windows-1250, for example) is refused with `invalid-job`, never sent with its letters replaced. |
 | `image` | One PNG. The Worker's limits are checked before anything is sent: at most 5 MB, each side 1-4096 px. |
 | `channels` | Optional. Network names (`linkedin`, `facebook`, `instagram`, ...) and/or channel ids, matched against the channels of the session. A network name takes every channel of that network. Default: every channel of the session. |
 | `channelText`, `channelTextFile` | Optional. A text for one channel, keyed by network name or channel id, in place of `text`. |

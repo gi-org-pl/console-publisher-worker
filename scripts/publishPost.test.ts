@@ -2556,7 +2556,10 @@ describe("the secret", () => {
       }
     });
 
-    it("is removed from a channel id that carries it", async () => {
+    it.each([
+      ["cf-access-client-secret"],
+      ["cf-access-client-id"],
+    ])("refuses a session whose channel ID carries %s, and writes no state", async (header) => {
       const job = await writeJob();
       answer = (request) =>
         request.path === "/api/buffer/session"
@@ -2564,25 +2567,32 @@ describe("the secret", () => {
               service: "gieniek-bot",
               channels: [
                 {
-                  id: String(request.headers["cf-access-client-secret"]),
+                  id: `ch-${request.headers[header]}`,
                   name: "Echo",
                   service: "linkedin",
                 },
+                instagram,
               ],
             })
           : undefined;
-      const { document, logs } = await client(["queue", job, "--send"]);
-      expect(document.channels[0]).toMatchObject({
-        id: "[redacted]",
-        outcome: "refused",
-        status: 403,
-      });
-      expect(logs).toEqual([
-        "session: 200",
-        "linkedin ([redacted]): upload 200",
-        "linkedin ([redacted]): post 403",
-      ]);
-      expect(Object.keys((await readState()).channels)).toEqual(["[redacted]"]);
+
+      for (const argv of [
+        ["queue", job, "--send"],
+        ["queue", job],
+      ]) {
+        const { exitCode, document } = await client(argv);
+        expect(exitCode).toBe(1);
+        expect(document.errors).toEqual([
+          {
+            code: "unusable-channel",
+            message:
+              "The session lists a channel whose ID contains a credential of this service: linkedin (ch-[redacted]). Nothing is sent until the Worker's channel list is fixed.",
+          },
+        ]);
+        expect(document.channels).toEqual([]);
+      }
+      expect(count()).toEqual({ session: 2, media: 0, posts: 0 });
+      expect(await readdir(dir)).not.toContain("post.state.json");
     });
   });
 

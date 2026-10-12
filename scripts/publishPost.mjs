@@ -423,6 +423,26 @@ async function execute(argv, deps, document, secrets, log) {
     return;
   }
 
+  // The state is keyed by channel ID, and it is cleared of both credentials
+  // before it is written. An ID that carries a credential would be written
+  // as something else, and the next run would not find its own entry. No
+  // channel has such an ID, so a session that says so is refused before
+  // anything is planned. (The network is one of a fixed list.)
+  const carrying = session.channels.filter((channel) =>
+    [credentials.clientSecret, credentials.clientId].some((credential) =>
+      channel.id.includes(credential),
+    ),
+  );
+  if (carrying.length > 0)
+    throw new ClientError(
+      "unusable-channel",
+      `The session lists a channel whose ID contains a credential of this service: ${carrying
+        .map((channel) => `${channel.service} (${channel.id})`)
+        .join(
+          ", ",
+        )}. Nothing is sent until the Worker's channel list is fixed.`,
+    );
+
   const { job, content, statePath, state } = prepared;
   const mode = MODES[options.command];
   document.mode = mode;

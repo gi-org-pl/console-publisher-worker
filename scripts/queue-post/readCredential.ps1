@@ -1,9 +1,9 @@
 # Reads one generic credential from the Windows credential store and prints it as Base64 of a JSON
 # object ({ clientId, clientSecret }), so no character of the secret depends on the console code page.
 #
-# serviceToken.mjs starts this script; nobody runs it by hand. The name of the
+# credentialStores.mjs starts this script; nobody runs it by hand. The name of the
 # credential comes in the environment variable PUBLISH_POST_CREDENTIAL, never inside the script text.
-# Exit code 3 means the store has no such entry; serviceToken.mjs knows it as WINDOWS_NOT_FOUND.
+# Exit code 3 means the store has no such entry; credentialStores.mjs knows it as WINDOWS_NOT_FOUND.
 #
 # PowerShell has no command that returns the secret of a stored credential, so the Win32 function
 # CredRead is declared below in C#. The terminator of the here-string ('@) has to stay at the start

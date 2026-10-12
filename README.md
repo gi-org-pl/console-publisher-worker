@@ -189,9 +189,24 @@ The script takes the service token from the environment: `CF_ACCESS_CLIENT_ID` a
 | Windows | Credential Manager > Windows Credentials > Add a generic credential | The address is `<name>`, the user name is the Client ID, the password is the Client Secret. |
 | macOS | The login Keychain, a generic password: `security add-generic-password -s <name> -a <Client ID> -w` (it asks for the password, so the secret is in no command line) | The service is `<name>`, the account is the Client ID, the password is the Client Secret. |
 
-On Windows the entry is read by `scripts/readCredential.ps1`, which the script starts itself. On macOS it is read with `/usr/bin/security`: the account first, and the password only when the account is a service token Client ID. The macOS path has not been run on a Mac yet.
+On Windows the entry is read by `scripts/queue-post/readCredential.ps1`, which the script starts itself. On macOS it is read with `/usr/bin/security`: the account first, and the password only when the account is a service token Client ID. The macOS path has not been run on a Mac yet.
 
 Both values of the token go into the two request headers and nowhere else: every text the script prints has them removed first, also when the other side repeats them, and a text of a job that contains them is refused.
+
+### Where the code is
+
+`scripts/queuePost.mjs` is the run itself, from the arguments to the JSON document. The steps it calls are in `scripts/queue-post/`:
+
+| Module | What it holds |
+| --- | --- |
+| `job.mjs` | The job file and its images, read from inside the job's folder. |
+| `plan.mjs` | What each channel gets, and its request ID. |
+| `console.mjs` | The requests to the Console, and what an answer to a post means. |
+| `serviceToken.mjs` | Where the token comes from, what it has to look like, and how it is kept out of the output. |
+| `credentialStores.mjs`, `readCredential.ps1` | Reading the Windows credential store and the macOS Keychain. |
+| `errors.mjs` | The error the script reports. |
+
+The tests of the token and the stores sit next to their modules. The tests in `scripts/queue-post/tests/` run the whole script against the Worker's own code, with stand-ins for Access, R2 and Buffer.
 
 ### Permission rule
 

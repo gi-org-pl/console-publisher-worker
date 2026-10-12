@@ -1323,6 +1323,32 @@ describe("the state file", () => {
     });
   });
 
+  describe("when the job changed while the result of its post is unknown", () => {
+    it("refuses to report the old request as this job's and sends nothing", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      await client(["queue", job]);
+      const state = await readState();
+      state.channels.li1.step = "posting";
+      const statePath = path.join(dir, "post.state.json");
+      await writeFile(statePath, JSON.stringify(state));
+      const before = await readFile(statePath, "utf8");
+      await writeJob({ channels: ["linkedin"], text: "Another text" });
+      seen = [];
+
+      const { exitCode, document } = await client(["queue", job, "--send"]);
+      expect(exitCode).toBe(1);
+      expect(document.errors).toEqual([
+        {
+          code: "state-mismatch",
+          message: `The job changed after a post for linkedin (li1) was sent with no recorded result: what may be in Buffer is the earlier content. ${CHECK_BUFFER} A new post needs a new state file (--state).`,
+        },
+      ]);
+      expect(document.channels).toEqual([]);
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+      expect(await readFile(statePath, "utf8")).toBe(before);
+    });
+  });
+
   describe("when the job changed after its post was created", () => {
     it("refuses to report the old post as this job's and sends nothing", async () => {
       const job = await writeJob();

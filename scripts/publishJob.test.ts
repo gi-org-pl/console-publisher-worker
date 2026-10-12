@@ -926,13 +926,18 @@ describe("planEntry", () => {
   });
 
   describe("when an earlier post request has no recorded result", () => {
-    it.each([
-      digest,
-      other,
-    ])("is never repeated, whatever the job says now", (current) => {
-      const posting = { ...entry, step: "posting" as const, mediaId };
-      expect(planEntry(posting, current, newId)).toEqual({
+    const posting = { ...entry, step: "posting" as const, mediaId };
+
+    it("is never repeated", () => {
+      expect(planEntry(posting, digest, newId)).toEqual({
         action: "unknown",
+        entry: posting,
+      });
+    });
+
+    it("is flagged when the job changed since, and not repeated either", () => {
+      expect(planEntry(posting, other, newId)).toEqual({
+        action: "changed",
         entry: posting,
       });
     });

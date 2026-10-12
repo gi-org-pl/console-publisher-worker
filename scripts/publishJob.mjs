@@ -677,7 +677,8 @@ export function serializeState(state) {
  * - `already-created`: the post exists, for exactly this content.
  * - `unknown`: an earlier post request has no recorded result. It is never
  *   repeated on its own.
- * - `changed`: the post exists, but for other content than the job now holds.
+ * - `changed`: a post exists, or may exist, for other content than the job
+ *   now holds. Nothing is reported as this job's.
  *
  * @param {StateEntry | undefined} entry
  * @param {string} digest of the content prepared for the channel now
@@ -690,7 +691,11 @@ export function planEntry(entry, digest, newId) {
       action: "send",
       entry: { requestId: newId(), digest, step: "prepared" },
     };
-  if (entry.step === "posting") return { action: "unknown", entry };
+  // What may be in Buffer is the content of that request, not of the job as
+  // it is now: reporting it as unknown for the new content would send the
+  // operator looking for the wrong post.
+  if (entry.step === "posting")
+    return { action: entry.digest === digest ? "unknown" : "changed", entry };
   if (entry.step === "created")
     return {
       action: entry.digest === digest ? "already-created" : "changed",

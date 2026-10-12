@@ -400,13 +400,26 @@ async function execute(argv, deps, document, secrets, log) {
   });
 
   const changed = plans.filter((plan) => plan.action === "changed");
-  if (changed.length > 0)
+  if (changed.length > 0) {
+    const names = (step) =>
+      changed
+        .filter((plan) => plan.entry.step === step)
+        .map((plan) => `${plan.channel.service} (${plan.channel.id})`)
+        .join(", ");
+    const created = names("created");
+    const sent = names("posting");
     throw new ClientError(
       "state-mismatch",
-      `The job changed after a post was created for ${changed
-        .map((plan) => `${plan.channel.service} (${plan.channel.id})`)
-        .join(", ")}. A new post needs a new state file (--state).`,
+      [
+        created && `The job changed after a post was created for ${created}.`,
+        sent &&
+          `The job changed after a post for ${sent} was sent with no recorded result: what may be in Buffer is the earlier content. ${CHECK_BUFFER}`,
+        "A new post needs a new state file (--state).",
+      ]
+        .filter(Boolean)
+        .join(" "),
     );
+  }
 
   for (const plan of plans)
     state.channels[plan.channel.id] = Object.assign(plan.entry, {

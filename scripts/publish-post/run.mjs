@@ -75,7 +75,13 @@ async function execute(argv, deps, document, secrets, log) {
   if (job.dueAt) document.dueAt = job.dueAt;
   document.state = statePath;
 
-  const plan = planRun({ options, deps, session, prepared, mode });
+  const { plans, targets, untimely } = planRun({
+    options,
+    deps,
+    session,
+    prepared,
+    mode,
+  });
   const { save, unsaved } = createStateWriter({
     state,
     statePath,
@@ -88,7 +94,7 @@ async function execute(argv, deps, document, secrets, log) {
   // IDs a dry run prints are the ones a later send uses. A run in which no
   // channel would be sent has nothing new to record: it reports what the
   // state holds, also from a disk that cannot be written.
-  if (!plan.untimely && plan.plans.some(plan.isOpen)) await save();
+  if (plans.some((plan) => plan.decision === "send")) await save();
 
   const sending = {
     context,
@@ -100,14 +106,12 @@ async function execute(argv, deps, document, secrets, log) {
     errors: document.errors,
     unsaved,
   };
-  for (const channelPlan of plan.plans)
+  for (const plan of plans)
     document.channels.push(
-      await reportChannel(channelPlan, {
+      await reportChannel(plan, {
         send: options.send,
-        untimely: plan.untimely,
-        targets: plan.targets,
-        isLate: plan.isLate,
-        stored: plan.stored,
+        targets,
+        untimely,
         sending,
       }),
     );

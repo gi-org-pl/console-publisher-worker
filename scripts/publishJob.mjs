@@ -634,6 +634,9 @@ const stateSchema = z.strictObject({
   // The Worker the state was made against: a post created at one address says
   // nothing about another, so a state without it cannot be used.
   origin: z.string().min(1),
+  // The channels of the first run that sent: later runs send to no other,
+  // whatever the session lists by then. `null` until such a run.
+  targets: z.array(z.string().min(1)).nullable(),
   channels: z.record(z.string().min(1), entrySchema),
 });
 
@@ -647,7 +650,7 @@ const stateSchema = z.strictObject({
  * @returns {State}
  */
 export function emptyState(origin) {
-  return { version: 1, origin, channels: {} };
+  return { version: 1, origin, targets: null, channels: {} };
 }
 
 /**

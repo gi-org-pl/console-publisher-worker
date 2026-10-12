@@ -165,6 +165,7 @@ async function writeJob(job: Record<string, unknown> = {}, name = "post.json") {
 async function readState(name = "post.state.json") {
   return JSON.parse(await readFile(path.join(dir, name), "utf8")) as {
     version: number;
+    targets: string[] | null;
     channels: Record<
       string,
       {
@@ -1141,11 +1142,20 @@ describe("schedule", () => {
 
     it("reports the channel that is done and holds back the one that is not", async () => {
       const dueAt = inMinutes(180);
-      const job = await writeJob({ dueAt, channels: ["linkedin"] });
+      const job = await writeJob({ dueAt });
+      // LinkedIn leaves the allowlist after the session listed it, so the
+      // first run creates the post of Instagram only.
+      afterAnswer = (request) => {
+        if (request.path === "/api/buffer/session")
+          env.CHANNELS_JSON = JSON.stringify([instagram]);
+      };
       const first = await client(["schedule", job, "--send"]);
-      expect(first.exitCode).toBe(0);
-      // The same job, now for both channels: Instagram was never sent.
-      await writeJob({ dueAt });
+      expect(outcomes(first.document.channels)).toEqual({
+        li1: "refused",
+        ig1: "created",
+      });
+      afterAnswer = () => {};
+      env.CHANNELS_JSON = JSON.stringify([linkedin, instagram]);
       seen = [];
 
       const { exitCode, document } = await client(["schedule", job, "--send"], {
@@ -1156,15 +1166,15 @@ describe("schedule", () => {
       expect(document.channels).toEqual([
         expect.objectContaining({
           id: "li1",
-          outcome: "already-created",
-          postId: first.document.channels[0].postId,
-        }),
-        expect.objectContaining({
-          id: "ig1",
           outcome: "failed",
           message: expect.stringMatching(
             /is not in the future\. This channel was not sent\.$/,
           ),
+        }),
+        expect.objectContaining({
+          id: "ig1",
+          outcome: "already-created",
+          postId: first.document.channels[1].postId,
         }),
       ]);
       expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
@@ -1493,6 +1503,122 @@ describe("an upload that fails", () => {
 });
 
 describe("the state file", () => {
+  describe("when the job selects a channel it was not first sent to", () => {
+    const linkedinTwo = {
+      id: "li2",
+      name: "Second LinkedIn",
+      service: "linkedin",
+    };
+    const heldBack =
+      /^This channel was not among the channels of the job when it was first sent \(li1\)\. It was not sent: a post for it needs a job of its own\.$/;
+
+    it.each([
+      ["a job for every channel", {}, instagram],
+      ["a job for a network", { channels: ["linkedin"] }, linkedinTwo],
+    ])("never sends %s to a channel the session gained later", async (_name, change, gained) => {
+      env.CHANNELS_JSON = JSON.stringify([linkedin]);
+      const job = await writeJob(change);
+      const first = await client(["queue", job, "--send"]);
+      expect(first.exitCode).toBe(0);
+      expect((await readState()).targets).toEqual(["li1"]);
+      const before = await readFile(path.join(dir, "post.state.json"), "utf8");
+
+      env.CHANNELS_JSON = JSON.stringify([linkedin, gained]);
+      seen = [];
+      for (const argv of [
+        ["queue", job, "--send"],
+        ["queue", job],
+      ]) {
+        const again = await client(argv);
+        expect(again.exitCode).toBe(1);
+        expect(again.document.errors).toEqual([]);
+        expect(again.document.channels).toEqual([
+          expect.objectContaining({
+            id: "li1",
+            outcome: "already-created",
+            postId: first.document.channels[0].postId,
+          }),
+          expect.objectContaining({
+            id: gained.id,
+            outcome: "failed",
+            message: expect.stringMatching(heldBack),
+          }),
+        ]);
+        expect(again.document.channels[1]).not.toHaveProperty("requestId");
+      }
+      expect(count()).toEqual({ session: 2, media: 0, posts: 0 });
+      expect(bufferFetch).toHaveBeenCalledTimes(1);
+      expect(await readFile(path.join(dir, "post.state.json"), "utf8")).toBe(
+        before,
+      );
+    });
+
+    it("holds back a channel that was added to the job after a send", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      await client(["queue", job, "--send"]);
+      await writeJob();
+      seen = [];
+
+      const { exitCode, document } = await client(["queue", job, "--send"]);
+      expect(exitCode).toBe(1);
+      expect(outcomes(document.channels)).toEqual({
+        li1: "already-created",
+        ig1: "failed",
+      });
+      expect(document.channels[1].message).toMatch(heldBack);
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+    });
+
+    it("still retries a channel of the first send next to one that is held back", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      // LinkedIn is refused the first time.
+      afterAnswer = (request) => {
+        if (request.path === "/api/buffer/session")
+          env.CHANNELS_JSON = JSON.stringify([instagram]);
+      };
+      const first = await client(["queue", job, "--send"]);
+      expect(outcomes(first.document.channels)).toEqual({ li1: "refused" });
+      afterAnswer = () => {};
+      env.CHANNELS_JSON = JSON.stringify([linkedin, linkedinTwo]);
+      seen = [];
+
+      const second = await client(["queue", job, "--send"]);
+      expect(second.exitCode).toBe(1);
+      expect(second.document.channels).toEqual([
+        expect.objectContaining({
+          id: "li1",
+          requestId: first.document.channels[0].requestId,
+          outcome: "created",
+        }),
+        expect.objectContaining({ id: "li2", outcome: "failed" }),
+      ]);
+      expect(count()).toEqual({ session: 1, media: 1, posts: 1 });
+      const state = await readState();
+      expect(state.targets).toEqual(["li1"]);
+      expect(Object.keys(state.channels)).toEqual(["li1"]);
+    });
+
+    it("fixes the channels at the first run that sends, not at a dry run", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      const dry = await client(["queue", job]);
+      expect(outcomes(dry.document.channels)).toEqual({ li1: "would-send" });
+      expect((await readState()).targets).toBeNull();
+
+      // The job is widened before anything went out.
+      await writeJob();
+      const sent = await client(["queue", job, "--send"]);
+      expect(sent.exitCode).toBe(0);
+      expect(outcomes(sent.document.channels)).toEqual({
+        li1: "created",
+        ig1: "created",
+      });
+      expect(sent.document.channels[0].requestId).toBe(
+        dry.document.channels[0].requestId,
+      );
+      expect((await readState()).targets).toEqual(["li1", "ig1"]);
+    });
+  });
+
   describe("when a run stopped between the upload and the post", () => {
     it("posts with the image that is already there", async () => {
       const job = await writeJob({ channels: ["linkedin"] });

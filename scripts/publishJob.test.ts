@@ -836,6 +836,7 @@ describe("the state", () => {
       const state = {
         version: 1 as const,
         origin: "https://console.gi.org.pl",
+        targets: ["li1", "fb1", "ig1"],
         channels: {
           li1: { ...entry, service: "linkedin", step: "created", postId: "p1" },
           fb1: {
@@ -855,6 +856,7 @@ describe("the state", () => {
       ).toEqual({
         version: 1,
         origin: "https://console.gi.org.pl",
+        targets: null,
         channels: {},
       });
     });
@@ -870,12 +872,32 @@ describe("the state", () => {
         '{"version":1,"channels":{}}',
         /^The state file is not a state of this client: origin: /,
       ],
-      [JSON.stringify({ version: 1, origin: 1, channels: {} }), /origin: /],
-      [JSON.stringify({ version: 1, origin: "", channels: {} }), /origin: /],
+      [
+        JSON.stringify({ version: 1, origin: 1, targets: null, channels: {} }),
+        /origin: /,
+      ],
+      [
+        JSON.stringify({ version: 1, origin: "", targets: null, channels: {} }),
+        /origin: /,
+      ],
+      // A state that does not say which channels its job was sent to.
+      [
+        JSON.stringify({ version: 1, origin, channels: {} }),
+        /^The state file is not a state of this client: targets: /,
+      ],
+      [
+        JSON.stringify({ version: 1, origin, targets: "li1", channels: {} }),
+        /targets: /,
+      ],
+      [
+        JSON.stringify({ version: 1, origin, targets: [""], channels: {} }),
+        /targets\.0: /,
+      ],
       [
         JSON.stringify({
           version: 1,
           origin,
+          targets: null,
           channels: { li1: { requestId } },
         }),
         /channels\.li1\.digest: /,
@@ -884,6 +906,7 @@ describe("the state", () => {
         JSON.stringify({
           version: 1,
           origin,
+          targets: null,
           channels: { li1: { ...entry, step: "sent" } },
         }),
         /channels\.li1\.step: /,
@@ -892,6 +915,7 @@ describe("the state", () => {
         JSON.stringify({
           version: 1,
           origin,
+          targets: null,
           channels: { li1: { ...entry, step: "created" } },
         }),
         /channels\.li1: a "created" entry needs a postId/,
@@ -900,6 +924,7 @@ describe("the state", () => {
         JSON.stringify({
           version: 1,
           origin,
+          targets: null,
           channels: { li1: { ...entry, clientSecret: "x" } },
         }),
         /Unrecognized key/,

@@ -457,10 +457,21 @@ async function execute(argv, deps, document, secrets, log) {
     }
   }
 
+  // The channels of a job are fixed by its first run that sends. A channel the
+  // job selects only later - the session gained one, or the job was edited -
+  // would get the content of a job that was sent before, in a run made to
+  // retry or to read results. It is reported and never sent.
+  const targets = state.targets;
+  const isLate = (plan) =>
+    targets !== null && !targets.includes(plan.channel.id);
+  if (targets === null && options.send)
+    state.targets = plans.map((plan) => plan.channel.id);
+
   for (const plan of plans)
-    state.channels[plan.channel.id] = Object.assign(plan.entry, {
-      service: plan.channel.service,
-    });
+    if (!isLate(plan))
+      state.channels[plan.channel.id] = Object.assign(plan.entry, {
+        service: plan.channel.service,
+      });
   let stateOnDisk = prepared.stateExists;
   const save = async () => {
     try {
@@ -498,7 +509,11 @@ async function execute(argv, deps, document, secrets, log) {
   // IDs a dry run prints are the ones a later send uses. A run in which no
   // channel would be sent has nothing new to record: it reports what the
   // state holds, also from a disk that cannot be written.
-  if (!untimely && plans.some((plan) => plan.action === "send")) await save();
+  if (
+    !untimely &&
+    plans.some((plan) => plan.action === "send" && !isLate(plan))
+  )
+    await save();
 
   const run = {
     context,
@@ -522,6 +537,11 @@ async function execute(argv, deps, document, secrets, log) {
           entry.message ??
           `An earlier run sent this post and recorded no result. ${CHECK_BUFFER}`,
       };
+    } else if (isLate(plan)) {
+      result = {
+        outcome: "failed",
+        message: `This channel was not among the channels of the job when it was first sent (${targets.join(", ")}). It was not sent: a post for it needs a job of its own.`,
+      };
     } else if (untimely) {
       result = {
         outcome: "failed",
@@ -544,7 +564,8 @@ async function execute(argv, deps, document, secrets, log) {
       id: channel.id,
       name: channel.name,
       service: channel.service,
-      requestId: entry.requestId,
+      // A channel that is held back for good has no request of its own.
+      ...(isLate(plan) ? {} : { requestId: entry.requestId }),
       ...result,
       text: plan.text,
       image: plan.image.path,

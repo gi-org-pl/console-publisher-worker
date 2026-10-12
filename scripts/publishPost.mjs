@@ -470,7 +470,11 @@ async function execute(argv, deps, document, secrets, log) {
       );
     }
   };
-  await save();
+  // The state is written before anything is planned to go out, so the request
+  // IDs a dry run prints are the ones a later send uses. A run in which no
+  // channel would be sent has nothing new to record: it reports what the
+  // state holds, also from a disk that cannot be written.
+  if (!untimely && plans.some((plan) => plan.action === "send")) await save();
 
   const run = {
     context,

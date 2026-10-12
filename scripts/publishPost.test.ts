@@ -1221,6 +1221,49 @@ describe("a post without a known result", () => {
     });
   });
 
+  describe("when the answer breaks off after its first line", () => {
+    const brokenBody =
+      (status: number) => async (input: URL, init: RequestInit) => {
+        const response = await localFetch(input, init);
+        if (input.pathname !== "/api/buffer/posts") return response;
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error("socket hang up"));
+            },
+          }),
+          { status },
+        );
+      };
+
+    it("reports a post answered with 200 as unknown, never as failed", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      const first = await client(["queue", job, "--send"], {
+        fetch: brokenBody(200),
+      });
+      expect(first.exitCode).toBe(1);
+      expect(first.document.channels[0]).toMatchObject({
+        outcome: "unknown",
+        status: 200,
+        message: `The Worker answered without a post ID. ${CHECK_BUFFER}`,
+      });
+      expect((await readState()).channels.li1.step).toBe("posting");
+
+      const second = await client(["queue", job, "--send"]);
+      expect(second.document.channels[0].outcome).toBe("unknown");
+      expect(count().posts).toBe(1);
+    });
+
+    it("reports a post answered with 502 as unknown too", async () => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      const { document } = await client(["queue", job, "--send"], {
+        fetch: brokenBody(502),
+      });
+      expect(document.channels[0].outcome).toBe("unknown");
+      expect((await readState()).channels.li1.step).toBe("posting");
+    });
+  });
+
   describe("when the answer is lost on the way back", () => {
     it("does not create a second post on the next run", async () => {
       const job = await writeJob({ channels: ["linkedin"] });
@@ -1725,6 +1768,31 @@ describe("the state file", () => {
         },
       };
     };
+
+    it("still reports posts that exist when the state cannot be written at all", async () => {
+      const job = await writeJob();
+      const first = await client(["queue", job, "--send"]);
+      expect(first.exitCode).toBe(0);
+      seen = [];
+
+      const second = await client(["queue", job, "--send"], {
+        fs: failingFrom(1),
+      });
+      expect(second.exitCode).toBe(0);
+      expect(second.document.errors).toEqual([]);
+      expect(
+        second.document.channels.map(({ outcome, postId }) => ({
+          outcome,
+          postId,
+        })),
+      ).toEqual(
+        first.document.channels.map(({ postId }) => ({
+          outcome: "already-created",
+          postId,
+        })),
+      );
+      expect(count()).toEqual({ session: 1, media: 0, posts: 0 });
+    });
 
     it("does not send a request whose state is not on disk", async () => {
       const job = await writeJob({ channels: ["linkedin"] });

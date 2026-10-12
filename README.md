@@ -304,6 +304,28 @@ An operator who lets an agent run this client can allow one command and leave th
 
 The rules match the start of the command, so they cover the job path, `--send` and `--credential`, and they do not cover `schedule`. They decide what may run without a question, not when the agent should publish; that belongs to its own instructions. What a service may publish at all stays limited by the Worker, see [Publishing restrictions](#publishing-restrictions).
 
+### Where the code is
+
+`scripts/publishPost.mjs` is the entry point and nothing else: it calls `run` and prints the document. The client is in `scripts/publish-post/`, one module per step of a run, in the order `run.mjs` calls them:
+
+| Module | What it holds |
+| --- | --- |
+| `run.mjs` | The whole command, step by step, and the JSON document it returns. Start reading here. |
+| `arguments.mjs` | The command line: commands, options, the address the run goes to. |
+| `credentials.mjs` | Where the service token comes from: the environment or the credential store. |
+| `readCredential.ps1` | The PowerShell script that reads one entry of the Windows credential store. `credentials.mjs` starts it; it is not run by hand. |
+| `job.mjs` | The job file and the files it names, checked against the Worker's limits. |
+| `state.mjs` | The state file: reading, planning one channel, writing. |
+| `worker.mjs` | The requests: the session, and the upload and the post of one channel. |
+| `requests.mjs` | How each request is built and how the answer to a post is read. No network here. |
+| `channels.mjs` | Which channels of the session a job means and what each one gets. |
+| `plan.mjs` | What the run does with each channel, decided before anything is sent. |
+| `report.mjs` | What the document says about one channel. |
+| `redaction.mjs` | Removing both values of the token from every output. |
+| `digest.mjs`, `files.mjs`, `errors.mjs` | Fingerprints of the content, reading text files, the error the client reports. |
+
+Each module has its tests next to it (`job.mjs`, `job.test.ts`). The tests in `scripts/publish-post/tests/` run the whole client against the Worker's own code on `127.0.0.1`, with stand-ins for Access, R2 and Buffer (`workerStandIn.ts`), one file per subject: `check`, `queue`, `schedule`, the state file, the secret and so on. After every one of them, each output and each file the client wrote is searched for both values of the token.
+
 ## R2 and deployment
 
 Use Node 24+ and Yarn 1.22. Enable R2 in your Cloudflare account, then:

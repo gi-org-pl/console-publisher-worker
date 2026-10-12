@@ -149,8 +149,15 @@ async function callWorker(context, request) {
   } catch {
     data = undefined;
   }
-  if (typeof data?.message === "string")
-    return { status, data, message: data.message.slice(0, MAX_MESSAGE_LENGTH) };
+  if (typeof data?.message === "string") {
+    // The credentials are taken out before the message is cut: a cut through
+    // one of them would leave a part that no later redaction can match.
+    const message = redact(data.message, [
+      request.headers["CF-Access-Client-Secret"],
+      request.headers["CF-Access-Client-Id"],
+    ]);
+    return { status, data, message: message.slice(0, MAX_MESSAGE_LENGTH) };
+  }
   return {
     status,
     data,

@@ -1745,6 +1745,33 @@ describe("the secret", () => {
       );
     });
 
+    it.each([
+      ["/api/buffer/media", 400],
+      ["/api/buffer/posts", 403],
+    ])("is removed whole when it lies across the length limit of a message of %s", async (failAt, status) => {
+      const job = await writeJob({ channels: ["linkedin"] });
+      // A message is cut at 500 characters: the secret starts ten before.
+      const padding = "p".repeat(490);
+      answer = (request) =>
+        request.path === failAt
+          ? Response.json(
+              {
+                message: `${padding}${request.headers["cf-access-client-secret"]} and ${request.headers["cf-access-client-id"]}`,
+              },
+              { status },
+            )
+          : undefined;
+      const { exitCode, document } = await client(["queue", job, "--send"]);
+      expect(exitCode).toBe(1);
+      const report = JSON.stringify(document);
+      const state = JSON.stringify(await readState());
+      for (const text of [report, state]) {
+        expect(text).toContain(`${padding}[redacted]`);
+        expect(text).not.toContain(clientSecret.slice(0, 8));
+        expect(text).not.toContain(clientId.slice(0, 8));
+      }
+    });
+
     it("is removed from a channel id that carries it", async () => {
       const job = await writeJob();
       answer = (request) =>

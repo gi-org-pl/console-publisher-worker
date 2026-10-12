@@ -36,28 +36,8 @@ export function selectsChannel(job, channel) {
  * @returns {Channel[]}
  */
 export function selectChannels(job, available, absent = []) {
-  // The state keeps one entry per channel id. An id listed twice would get two
-  // request ids and two posts, so a session like that is refused as a whole.
-  const repeated = available
-    .map((channel) => channel.id)
-    .filter((id, index, ids) => ids.indexOf(id) !== index);
-  if (repeated.length > 0)
-    throw new ClientError(
-      "duplicate-channel",
-      `The session lists a channel more than once: ${[...new Set(repeated)].join(", ")}. Nothing is sent until the Worker's channel list is fixed.`,
-    );
-  // The state file is a JSON object keyed by channel ID. A name that every
-  // object inherits (constructor, __proto__, toString, ...) cannot be such a
-  // key: it reads back as something that is no entry, and it does not survive
-  // a round trip through the file. Such a session is refused as a whole.
-  const inherited = available
-    .map((channel) => channel.id)
-    .filter((id) => id in Object.prototype);
-  if (inherited.length > 0)
-    throw new ClientError(
-      "unusable-channel",
-      `The session lists a channel whose ID cannot be a key of the state file: ${[...new Set(inherited)].join(", ")}. Nothing is sent until the Worker's channel list is fixed.`,
-    );
+  checkChannelList(available);
+
   const problems = [];
   let selected = available;
   if (job.channels) {
@@ -86,6 +66,35 @@ export function selectChannels(job, available, absent = []) {
         .join(", ")}.`,
     );
   return selected;
+}
+
+/**
+ * Refuses a session whose channel list the state file cannot hold.
+ * @param {{ id: string }[]} available the channels of the session
+ */
+function checkChannelList(available) {
+  // The state keeps one entry per channel id. An id listed twice would get two
+  // request ids and two posts, so a session like that is refused as a whole.
+  const repeated = available
+    .map((channel) => channel.id)
+    .filter((id, index, ids) => ids.indexOf(id) !== index);
+  if (repeated.length > 0)
+    throw new ClientError(
+      "duplicate-channel",
+      `The session lists a channel more than once: ${[...new Set(repeated)].join(", ")}. Nothing is sent until the Worker's channel list is fixed.`,
+    );
+  // The state file is a JSON object keyed by channel ID. A name that every
+  // object inherits (constructor, __proto__, toString, ...) cannot be such a
+  // key: it reads back as something that is no entry, and it does not survive
+  // a round trip through the file. Such a session is refused as a whole.
+  const inherited = available
+    .map((channel) => channel.id)
+    .filter((id) => id in Object.prototype);
+  if (inherited.length > 0)
+    throw new ClientError(
+      "unusable-channel",
+      `The session lists a channel whose ID cannot be a key of the state file: ${[...new Set(inherited)].join(", ")}. Nothing is sent until the Worker's channel list is fixed.`,
+    );
 }
 
 /**

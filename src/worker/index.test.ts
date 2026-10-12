@@ -757,3 +757,137 @@ describe("Given the publishing restrictions for a service", () => {
     expect(denials()).toEqual([]);
   });
 });
+
+describe("Given a post with several images", () => {
+  const images = [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+    "33333333-3333-4333-8333-333333333333",
+  ];
+  const { mediaId: _single, ...withoutImage } = input;
+  const several = { ...withoutImage, mediaIds: images };
+  const own = (ids: string[], owner = "user1") => {
+    for (const id of ids)
+      objects.set(`images/${id}`, { value: png(), customMetadata: { owner } });
+  };
+  const sentAssets = (call = 0) =>
+    JSON.parse(post.mock.calls[call][1].body).variables.input.assets;
+  const urls = (ids: string[]) =>
+    ids.map((id) => ({ image: { url: `${origin}/buffer-media/${id}.png` } }));
+
+  beforeEach(() => own(images));
+
+  it("creates one Buffer post with one asset per image, in the order given", async () => {
+    const order = [images[2], images[0], images[1]];
+    expect(await (await send({ ...several, mediaIds: order })).json()).toEqual({
+      postId: "post1",
+    });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(sentAssets()).toEqual(urls(order));
+    expect(
+      JSON.parse(post.mock.calls[0][1].body).variables.input.metadata,
+    ).toEqual({ instagram: { type: "post", shouldShareToFeed: true } });
+  });
+
+  it("keeps taking the single image of a client that knows no list", async () => {
+    expect((await send()).status).toBe(200);
+    expect(sentAssets()).toEqual(urls([mediaId]));
+  });
+
+  it("takes a list of one image like the single image", async () => {
+    expect((await send({ ...withoutImage, mediaIds: [mediaId] })).status).toBe(
+      200,
+    );
+    expect(sentAssets()).toEqual(urls([mediaId]));
+  });
+
+  it.each([
+    ["both a single image and a list", { ...several, mediaId }],
+    ["neither", withoutImage],
+    ["an empty list", { ...several, mediaIds: [] }],
+    ["the same image twice", { ...several, mediaIds: [images[0], images[0]] }],
+    ["an ID that is no UUID", { ...several, mediaIds: [images[0], "x"] }],
+    [
+      "more images than any network takes",
+      {
+        ...several,
+        mediaIds: Array.from({ length: 21 }, () => crypto.randomUUID()),
+      },
+    ],
+  ])("refuses %s with 400 before anything else", async (_name, body) => {
+    expect((await send(body)).status).toBe(400);
+    expect(post).not.toHaveBeenCalled();
+    expect(env.MEDIA.put).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["instagram", 10],
+    ["facebook", 10],
+    ["linkedin", 20],
+    ["threads", 1],
+    ["bluesky", 1],
+  ])("lets %s have %i and refuses one more with 400", async (service, limit) => {
+    env.CHANNELS_JSON = JSON.stringify([
+      { id: "allowed", name: "Channel", service },
+    ]);
+    const ids = Array.from({ length: limit + 1 }, () => crypto.randomUUID());
+    own(ids);
+
+    if (limit < 20) {
+      const refused = await send({ ...several, mediaIds: ids });
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({
+        message:
+          limit === 1
+            ? "This channel takes one image in a post."
+            : `This channel takes at most ${limit} images in a post.`,
+      });
+      expect(post).not.toHaveBeenCalled();
+    }
+
+    const accepted = await send({
+      ...several,
+      requestId: crypto.randomUUID(),
+      mediaIds: ids.slice(0, limit),
+    });
+    expect(accepted.status).toBe(200);
+    expect(sentAssets()).toHaveLength(limit);
+  });
+
+  it.each([
+    ["is missing", () => objects.delete(`images/${images[1]}`)],
+    ["belongs to someone else", () => own([images[1]], "user2")],
+  ])("refuses the whole post when one image %s, and Buffer is not called", async (_name, spoil) => {
+    spoil();
+    const response = await send(several);
+    expect(response.status).toBe(403);
+    expect(post).not.toHaveBeenCalled();
+    expect(objects.has(`receipts/${requestId}`)).toBe(false);
+  });
+
+  it("returns the same post for a retry with the same list and 409 for a changed one", async () => {
+    expect((await send(several)).status).toBe(200);
+    expect(await (await send(several)).json()).toEqual({ postId: "post1" });
+    expect(
+      (await send({ ...several, mediaIds: [images[1], images[0], images[2]] }))
+        .status,
+    ).toBe(409);
+    expect(
+      (await send({ ...several, mediaIds: images.slice(0, 2) })).status,
+    ).toBe(409);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens nothing new to a service: its own images only, and never at once", async () => {
+    asService();
+    expect((await sendAsService(several)).status).toBe(403);
+    expect(post).not.toHaveBeenCalled();
+
+    own(images, serviceOwner);
+    expect((await sendAsService({ ...several, mode: "shareNow" })).status).toBe(
+      403,
+    );
+    expect((await sendAsService(several)).status).toBe(200);
+    expect(sentAssets()).toEqual(urls(images));
+  });
+});

@@ -3,9 +3,10 @@ import {
   MAX_SCHEDULE_DAYS,
   MIN_SCHEDULE_LEAD_MS,
   type PublishInput,
+  postMediaIds,
   publishInputSchema,
 } from "../schemas/publishing";
-import { createBufferPost } from "./buffer";
+import { createBufferPost, maxImages } from "./buffer";
 import { error, json, readLimited } from "./http";
 import { actorFields, logError, logEvent } from "./log";
 import { imageKey } from "./media";
@@ -165,8 +166,27 @@ export async function createPost(
     return schedule;
   }
 
-  const media = await env.MEDIA.head(imageKey(input.mediaId));
-  if (!media || media.customMetadata?.owner !== operator.subject) {
+  const mediaIds = postMediaIds(input);
+  const limit = maxImages(channel);
+  if (mediaIds.length > limit) {
+    return error(
+      limit === 1
+        ? "This channel takes one image in a post."
+        : `This channel takes at most ${limit} images in a post.`,
+      400,
+    );
+  }
+
+  // Every image has to be there and be the caller's own before Buffer hears
+  // of the post: one that is not refuses the whole post.
+  const media = await Promise.all(
+    mediaIds.map((mediaId) => env.MEDIA.head(imageKey(mediaId))),
+  );
+  if (
+    media.some(
+      (image) => !image || image.customMetadata?.owner !== operator.subject,
+    )
+  ) {
     return error("The image expired or belongs to another operator.", 403);
   }
 

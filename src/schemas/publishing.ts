@@ -4,6 +4,11 @@ export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_IMAGE_DIMENSION = 4096;
 export const MIN_SCHEDULE_LEAD_MS = 60_000;
 export const MAX_SCHEDULE_DAYS = 30;
+/**
+ * The most images one request may name. It is the limit of the network that
+ * takes the most; the limit of each network is checked by the Worker.
+ */
+export const MAX_IMAGES_PER_POST = 20;
 /** The only modes a service may use. Publishing immediately stays with a person. */
 export const SERVICE_MODES = ["addToQueue", "customScheduled"] as const;
 /** Time for a person to pull a service's scheduled post back in Buffer. */
@@ -45,16 +50,29 @@ export const sessionSchema = z.union([
   z.object({ service: serviceNameSchema, channels: channelsSchema }).strict(),
 ]);
 export const uploadSchema = z.object({ mediaId: z.uuid() });
+/**
+ * The images of a post are given either as `mediaIds`, an ordered list, or as
+ * `mediaId`, the one image a post had before it could carry several.
+ */
 export const publishInputSchema = z
   .object({
     requestId: z.uuid(),
-    mediaId: z.uuid(),
+    mediaId: z.uuid().optional(),
+    mediaIds: z.array(z.uuid()).min(1).max(MAX_IMAGES_PER_POST).optional(),
     channelId: z.string().min(1),
     text: z.string().trim().min(1).max(5000),
     mode: z.enum(["addToQueue", "shareNow", "customScheduled"]),
     dueAt: z.iso.datetime().optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (input) => (input.mediaId === undefined) !== (input.mediaIds === undefined),
+    { message: 'Give either "mediaId" or "mediaIds".' },
+  )
+  .refine(
+    (input) => new Set(input.mediaIds).size === (input.mediaIds?.length ?? 0),
+    { message: "An image is listed twice.", path: ["mediaIds"] },
+  );
 export const publishResultSchema = z.object({ postId: z.string().min(1) });
 export const bufferResultSchema = z.object({
   data: z
@@ -71,3 +89,8 @@ export const bufferResultSchema = z.object({
 });
 export type PublishingSession = z.infer<typeof sessionSchema>;
 export type PublishInput = z.infer<typeof publishInputSchema>;
+
+/** The images of a post, in the order they are shown. */
+export function postMediaIds(input: PublishInput): string[] {
+  return input.mediaIds ?? (input.mediaId ? [input.mediaId] : []);
+}

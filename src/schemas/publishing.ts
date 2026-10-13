@@ -15,7 +15,7 @@ export const POST_TYPES = ["post", "story"] as const;
  * The only post types a service may create. A type added later is closed to
  * services until it is listed here.
  */
-export const SERVICE_POST_TYPES = ["post"] as const;
+export const SERVICE_POST_TYPES = ["post", "story"] as const;
 /** The only modes a service may use. Publishing immediately stays with a person. */
 export const SERVICE_MODES = ["addToQueue", "customScheduled"] as const;
 /** Time for a person to pull a service's scheduled post back in Buffer. */

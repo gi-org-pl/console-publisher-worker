@@ -76,7 +76,7 @@ Do **not** protect `/buffer-media/*` with that Access application: Buffer must f
 - **Format:** the Worker does not check the 9:16 ratio. Buffer calls it the suggested ratio, not a required one, and Console sends its 9:16 format.
 - **Instagram:** the story is not shared to the feed (`shouldShareToFeed: false`).
 - **Modes:** the queue, now and a chosen time work as for posts.
-- **Services:** a service may not create a story (403, with a `service-post-denied` log line). The types open to a service are listed in `SERVICE_POST_TYPES`; a story is public like a post, so opening it is a one-word change once someone decides to.
+- **Services:** a service may create a story, like a post. The modes, the lead time and the channel list apply to it exactly as to a post. The types open to a service are listed in `SERVICE_POST_TYPES`; a type that is not listed there is refused with 403 and a `service-post-denied` log line.
 - **A post and a story of the same material** are two requests with two request IDs.
 - Buffer publishes an Instagram story automatically only for a professional (Business or Creator) account. For another account it falls back to a reminder on a phone with the Buffer app, and the post does not go out by itself.
 
@@ -125,7 +125,7 @@ A service reads content that other people control - chat messages, issues, web p
 | Restriction | Behaviour | Configuration |
 | --- | --- | --- |
 | Modes | Only `addToQueue` and `customScheduled`. `shareNow` returns 403. | Fixed in code (`SERVICE_MODES`) |
-| Post types | Only `post`. A `story` returns 403. | Fixed in code (`SERVICE_POST_TYPES`) |
+| Post types | `post` and `story`. A type not listed returns 403. | Fixed in code (`SERVICE_POST_TYPES`) |
 | Lead time | A `customScheduled` post must be due at least 120 minutes from now, so a person has time to pull it back in Buffer. Earlier times return 400. Operators keep their one-minute minimum. | `minScheduleLeadMinutes` per service, 1 to 43199 |
 | Channels | By default every channel in `CHANNELS_JSON`. With a list, only those channels are returned by `/api/buffer/session` and accepted by `/api/buffer/posts`; others return 403. The list can narrow `CHANNELS_JSON` but never add to it. | `channelIds` per service, optional |
 

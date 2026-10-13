@@ -1013,21 +1013,46 @@ describe("Given a story", () => {
     expect(post).toHaveBeenCalledTimes(1);
   });
 
-  it("is not open to a service, which keeps its posts", async () => {
-    asService();
-    const refused = await sendAsService(story);
-    expect(refused.status).toBe(403);
-    expect(await refused.json()).toEqual({
-      message: "A service may not create a story.",
+  describe("from a service", () => {
+    const configure = (service: Record<string, unknown> = {}) => {
+      env.SERVICES_JSON = JSON.stringify([
+        { clientId, name: "gieniek-bot", ...service },
+      ]);
+    };
+    beforeEach(() => {
+      asService();
+      onChannel("instagram");
     });
-    expect(post).not.toHaveBeenCalled();
-    expect(errorLog).toHaveBeenCalledWith(
-      expect.stringContaining('"action":"service-post-denied"'),
-    );
 
-    expect(
-      (await sendAsService({ ...input, requestId: crypto.randomUUID() }))
-        .status,
-    ).toBe(200);
+    it("is accepted, queued like a post", async () => {
+      const response = await sendAsService(story);
+      expect(response.status).toBe(200);
+      expect(sent()).toMatchObject({ mode: "addToQueue" });
+    });
+
+    it("keeps the restrictions of a service: no immediate publishing", async () => {
+      expect((await sendAsService({ ...story, mode: "shareNow" })).status).toBe(
+        403,
+      );
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it("keeps the lead time of a service", async () => {
+      const soon = new Date(Date.now() + 3_600_000).toISOString();
+      const later = new Date(Date.now() + 3 * 3_600_000).toISOString();
+      const scheduled = { ...story, mode: "customScheduled" };
+      expect((await sendAsService({ ...scheduled, dueAt: soon })).status).toBe(
+        400,
+      );
+      expect((await sendAsService({ ...scheduled, dueAt: later })).status).toBe(
+        200,
+      );
+    });
+
+    it("keeps the channel list of a service", async () => {
+      configure({ channelIds: ["elsewhere"] });
+      expect((await sendAsService(story)).status).toBe(403);
+      expect(post).not.toHaveBeenCalled();
+    });
   });
 });

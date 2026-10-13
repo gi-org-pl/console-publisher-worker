@@ -1,7 +1,9 @@
 import {
   bufferResultSchema,
+  type PostType,
   type PublishInput,
   postMediaIds,
+  postType,
 } from "../schemas/publishing";
 import { mediaUrl } from "./media";
 import type { Channel, Env } from "./types";
@@ -13,13 +15,21 @@ const mutation = `mutation CreatePost($input: CreatePostInput!) {
   }
 }`;
 
+/** The networks that have stories; Buffer takes the type in their metadata. */
+const STORY_SERVICES: readonly Channel["service"][] = ["instagram", "facebook"];
+
+export function hasStories(channel: Channel): boolean {
+  return STORY_SERVICES.includes(channel.service);
+}
+
 /** Networks where Buffer rejects a post that has no channel-specific type. */
-function channelMetadata(channel: Channel): object | undefined {
+function channelMetadata(channel: Channel, type: PostType): object | undefined {
   switch (channel.service) {
     case "instagram":
-      return { instagram: { type: "post", shouldShareToFeed: true } };
+      // A story is not a feed post, so it is not shared to the feed.
+      return { instagram: { type, shouldShareToFeed: type === "post" } };
     case "facebook":
-      return { facebook: { type: "post" } };
+      return { facebook: { type } };
     default:
       return undefined;
   }
@@ -37,8 +47,10 @@ const MAX_IMAGES: Partial<Record<Channel["service"], number>> = {
   linkedin: 20,
 };
 
-export function maxImages(channel: Channel): number {
-  return MAX_IMAGES[channel.service] ?? 1;
+export function maxImages(channel: Channel, type: PostType = "post"): number {
+  // A story is one image here: several would be several frames, which was not
+  // asked for and not tried.
+  return type === "story" ? 1 : (MAX_IMAGES[channel.service] ?? 1);
 }
 
 /** Send one mutation. Callers must reserve its request ID before invoking this. */
@@ -51,7 +63,7 @@ export async function createBufferPost(
   const assets = postMediaIds(input).map((mediaId) => ({
     image: { url: mediaUrl(env, mediaId) },
   }));
-  const metadata = channelMetadata(channel);
+  const metadata = channelMetadata(channel, postType(input));
   const response = await fetch("https://api.buffer.com", {
     method: "POST",
     headers: {
@@ -64,7 +76,7 @@ export async function createBufferPost(
       variables: {
         input: {
           channelId: channel.id,
-          text: input.text,
+          ...(input.text === undefined ? {} : { text: input.text }),
           mode: input.mode,
           ...(input.dueAt ? { dueAt: input.dueAt } : {}),
           schedulingType: "automatic",

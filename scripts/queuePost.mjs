@@ -20,15 +20,22 @@ const USAGE =
 // Malformed bytes are an error, not a silent U+FFFD in a published text.
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
-const jobSchema = z.strictObject({
-  name: z.string().regex(/^[a-z0-9][a-z0-9-]{2,63}$/),
-  text: z.string(),
-  image: z.string(),
-  channels: z
-    .array(z.string().min(1))
-    .min(1)
-    .refine((ids) => new Set(ids).size === ids.length),
-});
+const jobSchema = z
+  .strictObject({
+    name: z.string().regex(/^[a-z0-9][a-z0-9-]{2,63}$/),
+    type: z.enum(["post", "story"]).default("post"),
+    text: z.string().optional(),
+    // `image` is the one-image form of `images`, so earlier jobs stay valid.
+    image: z.string().optional(),
+    images: z.array(z.string()).min(1).optional(),
+    channels: z
+      .array(z.string().min(1))
+      .min(1)
+      .refine((ids) => new Set(ids).size === ids.length),
+  })
+  .refine((job) => (job.image === undefined) !== (job.images === undefined))
+  // A post needs a text and a story has none; the Worker's other rules are its own.
+  .refine((job) => (job.type === "story") === (job.text === undefined));
 
 /** @param {string[]} argv */
 function parseArguments(argv) {
@@ -64,7 +71,7 @@ async function readImage(folder, file) {
   });
 }
 
-/** The job file and its image. Nothing leaves the machine here. */
+/** The job file and its images. Nothing leaves the machine here. */
 async function readJob(file, cwd) {
   const jobPath = path.resolve(cwd, file);
   let parsed;
@@ -80,16 +87,23 @@ async function readJob(file, cwd) {
   }
   if (!parsed.success)
     throw new Error(
-      `The job is not valid: name, text, image and channels, and nothing else, are expected (see: ${parsed.error.issues.map((issue) => issue.path.join(".") || "job").join(", ")}).`,
+      `The job is not valid: a name, channels, image or images, and a text (a post only), and nothing else, are expected (see: ${parsed.error.issues.map((issue) => issue.path.join(".") || "job").join(", ")}).`,
     );
   const folder = path.dirname(await realpath(jobPath));
-  return { ...parsed.data, bytes: await readImage(folder, parsed.data.image) };
+  const { image, ...job } = parsed.data;
+  const images = job.images ?? [image];
+  const bytes = [];
+  for (const file of images) bytes.push(await readImage(folder, file));
+  return { ...job, images, bytes };
 }
 
 /** The request ID of a channel: the same for every run of the same post. */
-function requestId(clientId, name, channelId) {
+function requestId(clientId, { name, type }, channelId) {
   const hash = createHash("sha256")
-    .update(`${clientId}\n${name}\n${channelId}`)
+    // The type is hashed for a story only, so the IDs of posts stay what they were.
+    .update(
+      `${clientId}\n${name}\n${channelId}${type === "story" ? "\nstory" : ""}`,
+    )
     .digest("hex");
   const variant = "89ab"[Number.parseInt(hash[16], 16) & 3];
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-${variant}${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
@@ -150,33 +164,40 @@ async function execute(argv, deps, secrets, document) {
 
   const job = await readJob(file, deps.cwd);
   // These go out as they are: one that holds the token would publish it.
-  const sent = [job.text, ...job.channels];
+  const sent = [job.text ?? "", ...job.channels, ...job.images];
   if (sent.some((value) => secrets.some((secret) => value.includes(secret))))
     throw new Error(
-      "The text or a channel of the job contains the service token. Nothing was sent.",
+      "The text, a channel or an image path of the job contains the service token. Nothing was sent.",
     );
   const channels = job.channels.map((channelId) => ({
     channelId,
-    requestId: requestId(token.clientId, job.name, channelId),
+    requestId: requestId(token.clientId, job, channelId),
   }));
   if (command === "preview")
     return {
       name: job.name,
-      text: job.text,
-      image: job.image,
+      type: job.type,
+      ...(job.text !== undefined && { text: job.text }),
+      images: job.images,
       channels,
     };
 
-  const upload = await ask(context, "/api/buffer/media", {
-    method: "POST",
-    type: "image/png",
-    body: job.bytes,
-  });
-  const mediaId = upload.status === 200 ? upload.response?.mediaId : undefined;
+  // Each image once, in order; the first failure stops the run before any post.
+  const mediaIds = [];
+  let upload;
+  for (const body of job.bytes) {
+    upload = await ask(context, "/api/buffer/media", {
+      method: "POST",
+      type: "image/png",
+      body,
+    });
+    if (upload.status !== 200 || upload.response?.mediaId === undefined) break;
+    mediaIds.push(upload.response.mediaId);
+  }
   const results = [];
   for (const channel of channels)
     results.push(
-      mediaId === undefined
+      mediaIds.length < job.bytes.length
         ? { ...channel, step: "upload", ...upload }
         : {
             ...channel,
@@ -186,9 +207,10 @@ async function execute(argv, deps, secrets, document) {
               type: "application/json",
               body: JSON.stringify({
                 requestId: channel.requestId,
-                mediaId,
+                mediaIds,
                 channelId: channel.channelId,
                 text: job.text,
+                ...(job.type === "story" && { type: "story" }),
                 mode: "addToQueue",
               }),
             })),

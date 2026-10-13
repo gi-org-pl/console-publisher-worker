@@ -153,7 +153,7 @@ There is no command for "now" and none for a chosen time. `--credential <name>` 
 | Key | Meaning |
 | --- | --- |
 | `name` | The name of the post: 3 to 64 lower-case letters, digits and hyphens. It decides what counts as the same post, see [A second run](#a-second-run). |
-| `text` | The text, as it goes out, on every channel. |
+| `text` | The text for every channel, as the job has it; the Worker trims leading and trailing whitespace before it publishes, and `preview` shows the text untrimmed. |
 | `image` | A PNG as a path inside the folder of the job, the same for every channel. An absolute path, a network path and anything that leaves the folder (also through a link) is refused. |
 | `channels` | The channel IDs the Worker knows (`check` prints them). At least one. |
 

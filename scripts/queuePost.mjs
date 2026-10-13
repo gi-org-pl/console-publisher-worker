@@ -17,6 +17,9 @@ const CONSOLE = "https://console.gi.org.pl";
 const USAGE =
   "Usage: node scripts/queuePost.mjs check | preview <job.json> | queue <job.json> [--credential <name>]";
 
+// Malformed bytes are an error, not a silent U+FFFD in a published text.
+const UTF8 = new TextDecoder("utf-8", { fatal: true });
+
 const jobSchema = z.strictObject({
   name: z.string().regex(/^[a-z0-9][a-z0-9-]{2,63}$/),
   text: z.string(),
@@ -62,7 +65,9 @@ async function readJob(file, cwd) {
   const jobPath = path.resolve(cwd, file);
   let parsed;
   try {
-    parsed = jobSchema.safeParse(JSON.parse(await readFile(jobPath, "utf8")));
+    parsed = jobSchema.safeParse(
+      JSON.parse(UTF8.decode(await readFile(jobPath))),
+    );
   } catch (cause) {
     // What the file holds is not repeated: it may be any file.
     throw new Error(

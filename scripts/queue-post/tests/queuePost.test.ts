@@ -462,6 +462,26 @@ describe("the job", () => {
     expect(seen).toHaveLength(0);
   });
 
+  it("refuses bytes that are not UTF-8 instead of publishing replacement characters", async () => {
+    await writeFile(path.join(dir, "post.png"), png());
+    await writeFile(
+      path.join(dir, "post.json"),
+      Buffer.concat([
+        Buffer.from(
+          '{"name":"autumn-news","image":"post.png","channels":["li1"],"text":"Hi ',
+        ),
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from('"}'),
+      ]),
+    );
+    const { exitCode, document } = await script(["queue", "post.json"]);
+    expect(exitCode).toBe(1);
+    expect(document.error).toBe(
+      "Cannot read the job: ERR_ENCODING_INVALID_ENCODED_DATA.",
+    );
+    expect(seen).toHaveLength(0);
+  });
+
   describe("when the image is not inside the folder of the job", () => {
     it.each([
       ["a file above the folder", "../outside.png", "is not inside the folder"],

@@ -201,7 +201,7 @@ A story has a `type`, no text and one image:
 | `image` | One path, the same as `images` with one entry, so earlier jobs keep working. A job has `images` or `image`, not both. |
 | `channels` | The channel IDs the Worker knows (`check` prints them). At least one, none twice. |
 
-A key the script does not know stops the run before anything is requested. The script checks nothing else: how many images a network takes, which networks have stories, the size and format of an image and the channels are the Worker's rules. It sends the request anyway and prints the Worker's 400 or 403 in that channel's entry; the other channels still get theirs, and the exit code is 1. Whether a service may queue stories at all is the Worker's policy too (`SERVICE_POST_TYPES`); where it does not, a story gets 403.
+A key the script does not know stops the run before anything is requested. The script checks nothing else: how many images a network takes, that stories are for Instagram channels only (a Facebook channel gets 400 "This channel has no stories."), the size and format of an image and the channels are the Worker's rules. It sends the request anyway and prints the Worker's 400 or 403 in that channel's entry; the other channels still get theirs, and the exit code is 1. Whether a service may queue stories at all is the Worker's policy too (`SERVICE_POST_TYPES`); where it does not, a story gets 403.
 
 ### A second run
 

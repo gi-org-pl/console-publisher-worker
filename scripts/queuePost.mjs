@@ -134,14 +134,14 @@ async function ask(
 }
 
 /** The four steps of `queue`: the token, the job, the image once, a post per channel. */
-async function execute(argv, deps, secrets) {
+async function execute(argv, deps, secrets, document) {
   const { command, file, credential } = parseArguments(argv);
+  document.command = command;
   const token = await readServiceToken(deps, credential);
   secrets.push(token.clientSecret, token.clientId);
   const context = { deps, token };
   if (command === "check")
     return {
-      command,
       results: [
         { step: "session", ...(await ask(context, "/api/buffer/session")) },
       ],
@@ -160,7 +160,6 @@ async function execute(argv, deps, secrets) {
   }));
   if (command === "preview")
     return {
-      command,
       name: job.name,
       text: job.text,
       image: job.image,
@@ -194,7 +193,7 @@ async function execute(argv, deps, secrets) {
             })),
           },
     );
-  return { command, name: job.name, results };
+  return { name: job.name, results };
 }
 
 /**
@@ -215,14 +214,12 @@ export async function run(argv, overrides = {}) {
     ...overrides,
   };
   const secrets = [];
-  let document;
+  const document = { command: null };
   try {
-    document = await execute(argv, deps, secrets);
+    Object.assign(document, await execute(argv, deps, secrets, document));
   } catch (cause) {
     // Whatever went wrong, the caller still gets the JSON document it parses.
-    document = {
-      error: cause instanceof Error ? cause.message : String(cause),
-    };
+    document.error = cause instanceof Error ? cause.message : String(cause);
   }
   // Only a post the Worker accepted counts; a failed upload leaves no post.
   const ok =
@@ -232,7 +229,7 @@ export async function run(argv, overrides = {}) {
     );
   return {
     exitCode: ok ? 0 : 1,
-    document: redact({ ok, command: null, ...document }, secrets),
+    document: redact({ ok, ...document }, secrets),
   };
 }
 

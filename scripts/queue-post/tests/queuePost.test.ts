@@ -401,6 +401,7 @@ describe("the token", () => {
     const { exitCode, document } = await script(["check"], { env: {} });
     expect(exitCode).toBe(1);
     expect(document.error).toMatch(/^Set CF_ACCESS_CLIENT_ID/);
+    expect(document.command).toBe("check");
     expect(seen).toHaveLength(0);
   });
 

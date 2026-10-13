@@ -179,7 +179,7 @@ One JSON document on stdout:
 }
 ```
 
-Per channel, `status` is the HTTP status of the Worker and `response` what it said. `step` is `post`, or `upload` when the image was not uploaded and so nothing was posted (then `status` and `response` are the upload's). Status `0` means no answer (the connection broke or the 60 seconds passed); for a post that means the post may exist, so look in Buffer before anything else - running the job again cannot create a second one. `check` has one result with `step: "session"`; `preview` has `name`, `text`, `image` and `channels` instead of `results`; a failure of the script itself is `{ "ok": false, "command": ..., "error": "..." }`. The exit code is 0 only when `ok` is true: no error, and every request answered with a 2xx status.
+Per channel, `status` is the HTTP status of the Worker and `response` what it said. `step` is `post`, or `upload` when the image was not uploaded and so nothing was posted (then `status` and `response` are the upload's). Status `0` means no answer (the connection broke or the 60 seconds passed); for a post that means the post may exist, so look in Buffer before anything else - running the job again cannot create a second one. `check` has one result with `step: "session"`; `preview` has `name`, `text`, `image` and `channels` instead of `results`; a failure of the script itself is `{ "ok": false, "command": ..., "error": "..." }` with the command as far as the arguments were understood (otherwise `null`). The exit code is 0 only when `ok` is true: no error, and every request answered with a 2xx status.
 
 ### The token
 

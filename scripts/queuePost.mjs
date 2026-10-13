@@ -56,7 +56,8 @@ async function readImage(folder, file) {
     throw refuse("cannot be read");
   });
   const inside = path.relative(folder, real);
-  if (inside === "" || inside.startsWith("..") || path.isAbsolute(inside))
+  const leaves = inside === ".." || inside.startsWith(`..${path.sep}`);
+  if (inside === "" || leaves || path.isAbsolute(inside))
     throw refuse("is not inside the folder of the job");
   return readFile(real).catch(() => {
     throw refuse("cannot be read");

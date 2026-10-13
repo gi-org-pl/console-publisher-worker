@@ -512,6 +512,17 @@ describe("the job", () => {
       expect(seen).toHaveLength(0);
     });
 
+    it("accepts a name that only begins with two dots", async () => {
+      await mkdir(path.join(dir, "..assets"));
+      await writeFile(path.join(dir, "..assets", "..hero.png"), png());
+      const job = await writeJob({
+        channels: ["li1"],
+        image: "..assets/..hero.png",
+      });
+      const { exitCode } = await script(["queue", job]);
+      expect(exitCode).toBe(0);
+    });
+
     it("refuses a link that leads out of the folder", async (context) => {
       await mkdir(path.join(dir, "inner"));
       await writeFile(path.join(dir, "outside.png"), png());

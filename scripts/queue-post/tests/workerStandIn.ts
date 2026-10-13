@@ -138,8 +138,6 @@ export async function writeJob(
 
 export const count = (route: string) =>
   seen.filter((request) => request.path === `/api/buffer/${route}`).length;
-export const outcomes = (channels: Channel[]) =>
-  Object.fromEntries(channels.map((channel) => [channel.id, channel.outcome]));
 /** What Buffer was asked to create. */
 export const bufferPosts = () =>
   bufferFetch.mock.calls.map(

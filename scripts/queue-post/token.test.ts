@@ -2,8 +2,12 @@
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { runProcess, windowsCommand } from "./credentialStores.mjs";
-import { readServiceToken } from "./serviceToken.mjs";
+import {
+  readServiceToken,
+  redact,
+  runProcess,
+  windowsCommand,
+} from "./token.mjs";
 
 const token = {
   clientId: "0123456789abcdef0123456789abcdef.access",
@@ -83,41 +87,32 @@ describe("the Windows credential store", () => {
     it.each([
       [
         { code: 3, stdout: "" },
-        "credential-unavailable",
         'The Windows credential store has no generic credential named "console-bot".',
       ],
       [
         { code: 1, stdout: "" },
-        "credential-unavailable",
         "Reading the Windows credential store failed (PowerShell exit code 1).",
       ],
       [
         { code: 0, stdout: token.clientSecret },
-        "credential-unavailable",
         "The answer of the credential store could not be read.",
       ],
       [
         stored({ clientId: token.clientId }),
-        "credential-unavailable",
         "The answer of the credential store could not be read.",
       ],
-      [
-        stored(null),
-        "credential-unavailable",
-        "The answer of the credential store could not be read.",
-      ],
+      [stored(null), "The answer of the credential store could not be read."],
       [
         stored({ clientId: "someone", clientSecret: token.clientSecret }),
-        "invalid-credentials",
-        'The Client ID from the credential "console-bot" is not a service token Client ID (32 hexadecimal characters and ".access").',
+        'The pair from the credential "console-bot" is not a service token: the Client ID is 32 hexadecimal characters and ".access", the Client Secret is at least 32 characters without spaces.',
       ],
-    ])("reports a reader that answers %j", async (result, code, message) => {
+    ])("reports a reader that answers %j", async (result, message) => {
       await expect(
         readServiceToken(
           { env: {}, platform: "win32", runProcess: async () => result },
           "console-bot",
         ),
-      ).rejects.toThrow(expect.objectContaining({ code, message }));
+      ).rejects.toThrow(message);
     });
   });
 });
@@ -166,11 +161,7 @@ describe("the macOS Keychain", () => {
         "Wi-Fi",
       );
       await expect(read).rejects.toThrow(
-        expect.objectContaining({
-          code: "credential-unavailable",
-          message:
-            'The account of the Keychain item "Wi-Fi" is not a service token Client ID. Its password was not read.',
-        }),
+        'The account of the Keychain item "Wi-Fi" is not a service token Client ID. Its password was not read.',
       );
       expect(run).toHaveBeenCalledTimes(1);
     });
@@ -194,9 +185,7 @@ describe("the macOS Keychain", () => {
           },
           "console-bot",
         ),
-      ).rejects.toThrow(
-        expect.objectContaining({ code: "credential-unavailable", message }),
-      );
+      ).rejects.toThrow(message);
     });
 
     it("reports a password that could not be read, without the account", async () => {
@@ -261,5 +250,70 @@ describe("runProcess", () => {
         }),
       ).toEqual({ code: -1, stdout: "" });
     });
+  });
+});
+
+const fromEnvironment = {
+  CF_ACCESS_CLIENT_ID: token.clientId,
+  CF_ACCESS_CLIENT_SECRET: token.clientSecret,
+};
+const never = async () => {
+  throw new Error("The credential store must not be read here");
+};
+
+describe("the environment", () => {
+  it("is used, and the store is not read even when one is named", async () => {
+    expect(
+      await readServiceToken(
+        { env: fromEnvironment, platform: "win32", runProcess: never },
+        "console-bot",
+      ),
+    ).toEqual(token);
+  });
+
+  it.each([
+    [{ CF_ACCESS_CLIENT_ID: "someone" }],
+    [{ CF_ACCESS_CLIENT_SECRET: "e" }],
+    [{ CF_ACCESS_CLIENT_SECRET: `${"a".repeat(40)} b` }],
+  ])("refuses %j without repeating a value", async (change) => {
+    const read = readServiceToken({
+      env: { ...fromEnvironment, ...change },
+      platform: "linux",
+      runProcess: never,
+    });
+    await expect(read).rejects.toThrow("is not a service token");
+    await expect(read).rejects.not.toThrow(/someone|aaaa/);
+  });
+
+  it.each([
+    [{}],
+    [{ CF_ACCESS_CLIENT_ID: token.clientId }],
+    [{ CF_ACCESS_CLIENT_SECRET: token.clientSecret }],
+  ])("reports %j as missing credentials", async (env) => {
+    await expect(
+      readServiceToken({ env, platform: "win32", runProcess: never }),
+    ).rejects.toThrow(
+      "Set CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET, or pass --credential <name> on Windows or macOS.",
+    );
+  });
+
+  it("says which systems have a store when the system has none", async () => {
+    await expect(
+      readServiceToken(
+        { env: {}, platform: "linux", runProcess: never },
+        "console-bot",
+      ),
+    ).rejects.toThrow("--credential reads the Windows credential store");
+  });
+});
+
+describe("redact", () => {
+  it("removes every secret from strings, keys and nested values", () => {
+    expect(
+      redact(
+        { [`k ${token.clientId}`]: [`a ${token.clientSecret} b`, 1, null] },
+        [token.clientSecret, token.clientId],
+      ),
+    ).toEqual({ "k [redacted]": ["a [redacted] b", 1, null] });
   });
 });

@@ -381,18 +381,17 @@ describe("the token", () => {
   });
 
   it.each([
-    ["the secret", clientSecret],
-    ["the Client ID", clientId],
-  ])("is never published: a text holding %s is refused before any request", async (_name, value) => {
-    const job = await writeJob({
-      channels: ["li1"],
-      text: `see ${value}`,
-    });
+    ["a text holding the secret", { text: `see ${clientSecret}` }],
+    ["a text holding the Client ID", { text: `see ${clientId}` }],
+    ["a channel that is the secret", { channels: ["li1", clientSecret] }],
+    ["a channel that holds the Client ID", { channels: [`${clientId}x`] }],
+  ])("is never published: %s is refused before any request", async (_name, change) => {
+    const job = await writeJob({ channels: ["li1"], ...change });
     for (const command of ["preview", "queue"]) {
       const { exitCode, document } = await script([command, job]);
       expect(exitCode).toBe(1);
       expect(document.error).toBe(
-        "The text of the job contains the service token. Nothing was sent.",
+        "The text or a channel of the job contains the service token. Nothing was sent.",
       );
     }
     expect(seen).toHaveLength(0);
@@ -440,6 +439,11 @@ describe("the job", () => {
       "a name that is not a slug",
       { name: "Autumn News!" },
       "The job is not valid: name, text, image and channels, and nothing else, are expected (see: name).",
+    ],
+    [
+      "the same channel twice",
+      { channels: ["li1", "li1"] },
+      "The job is not valid: name, text, image and channels, and nothing else, are expected (see: channels).",
     ],
     [
       "no channels",

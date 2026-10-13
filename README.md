@@ -155,7 +155,7 @@ There is no command for "now" and none for a chosen time. `--credential <name>` 
 | `name` | The name of the post: 3 to 64 lower-case letters, digits and hyphens. It decides what counts as the same post, see [A second run](#a-second-run). |
 | `text` | The text for every channel, as the job has it; the Worker trims leading and trailing whitespace before it publishes, and `preview` shows the text untrimmed. |
 | `image` | A PNG as a path inside the folder of the job, the same for every channel. An absolute path, a network path and anything that leaves the folder (also through a link) is refused. |
-| `channels` | The channel IDs the Worker knows (`check` prints them). At least one. |
+| `channels` | The channel IDs the Worker knows (`check` prints them). At least one, none twice. |
 
 A key the script does not know stops the run before anything is requested. The text, the size and format of the image and the channels are checked by the Worker, which answers 400 or 403 for the channel it turns down.
 
@@ -192,7 +192,7 @@ The script takes the service token from the environment: `CF_ACCESS_CLIENT_ID` a
 
 On Windows the entry is read by `scripts/queue-post/readCredential.ps1`, which the script starts itself. On macOS it is read with `/usr/bin/security`: the account first, and the password only when the account is a service token Client ID. The macOS path has not been run on a Mac yet.
 
-Both values of the token go into the two request headers and nowhere else: every text the script prints has them removed first, also when the Worker repeats them, and a job whose text contains them is refused before anything is sent.
+Both values of the token go into the two request headers and nowhere else: every text the script prints has them removed first, also when the Worker repeats them, and a job whose text or channel contains them is refused before anything is sent.
 
 ### Where the code is
 

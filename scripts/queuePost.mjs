@@ -24,7 +24,10 @@ const jobSchema = z.strictObject({
   name: z.string().regex(/^[a-z0-9][a-z0-9-]{2,63}$/),
   text: z.string(),
   image: z.string(),
-  channels: z.array(z.string().min(1)).min(1),
+  channels: z
+    .array(z.string().min(1))
+    .min(1)
+    .refine((ids) => new Set(ids).size === ids.length),
 });
 
 /** @param {string[]} argv */
@@ -145,10 +148,11 @@ async function execute(argv, deps, secrets) {
     };
 
   const job = await readJob(file, deps.cwd);
-  // A text goes out as it is: one that holds the token would publish it.
-  if ([token.clientId, token.clientSecret].some((s) => job.text.includes(s)))
+  // These go out as they are: one that holds the token would publish it.
+  const sent = [job.text, ...job.channels];
+  if (sent.some((value) => secrets.some((secret) => value.includes(secret))))
     throw new Error(
-      "The text of the job contains the service token. Nothing was sent.",
+      "The text or a channel of the job contains the service token. Nothing was sent.",
     );
   const channels = job.channels.map((channelId) => ({
     channelId,

@@ -138,7 +138,8 @@ describe("preview", () => {
       command: "preview",
       name: "autumn-news",
       text: "Hello from the job",
-      image: "post.png",
+      type: "post",
+      images: ["post.png"],
       channels: [
         { channelId: "li1", requestId: expect.any(String) },
         { channelId: "ig1", requestId: expect.any(String) },
@@ -391,7 +392,7 @@ describe("the token", () => {
       const { exitCode, document } = await script([command, job]);
       expect(exitCode).toBe(1);
       expect(document.error).toBe(
-        "The text or a channel of the job contains the service token. Nothing was sent.",
+        "The text, a channel or an image path of the job contains the service token. Nothing was sent.",
       );
     }
     expect(seen).toHaveLength(0);
@@ -434,22 +435,22 @@ describe("the job", () => {
     [
       "an unknown key",
       { mode: "shareNow" },
-      "The job is not valid: name, text, image and channels, and nothing else, are expected (see: job).",
+      "The job is not valid: a name, channels, image or images, and a text (a post only), and nothing else, are expected (see: job).",
     ],
     [
       "a name that is not a slug",
       { name: "Autumn News!" },
-      "The job is not valid: name, text, image and channels, and nothing else, are expected (see: name).",
+      "The job is not valid: a name, channels, image or images, and a text (a post only), and nothing else, are expected (see: name).",
     ],
     [
       "the same channel twice",
       { channels: ["li1", "li1"] },
-      "The job is not valid: name, text, image and channels, and nothing else, are expected (see: channels).",
+      "The job is not valid: a name, channels, image or images, and a text (a post only), and nothing else, are expected (see: channels).",
     ],
     [
       "no channels",
       { channels: [] },
-      "The job is not valid: name, text, image and channels, and nothing else, are expected (see: channels).",
+      "The job is not valid: a name, channels, image or images, and a text (a post only), and nothing else, are expected (see: channels).",
     ],
   ])("refuses %s before any request", async (_name, content, message) => {
     await writeFile(path.join(dir, "post.png"), png());
@@ -548,5 +549,214 @@ describe("the job", () => {
       expect(document.error).toContain("is not inside the folder");
       expect(seen).toHaveLength(0);
     });
+  });
+});
+
+/** The script's `fetch`, noting the post requests and the media ids handed out. */
+function watch() {
+  const posts: Record<string, unknown>[] = [];
+  const mediaIds: string[] = [];
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/posts")) posts.push(JSON.parse(String(init?.body)));
+    const response = await viaWorker(input, init);
+    if (url.endsWith("/media"))
+      mediaIds.push((await response.clone().json()).mediaId);
+    return response;
+  };
+  return { posts, mediaIds, fetch };
+}
+const twoImages = async (change: Record<string, unknown> = {}) => {
+  await writeFile(path.join(dir, "second.png"), png(32));
+  return writeJob({
+    channels: both,
+    image: undefined,
+    images: ["post.png", "second.png"],
+    ...change,
+  });
+};
+
+describe("several images", () => {
+  it("uploads each image once and posts mediaIds in the order of the job", async () => {
+    const watched = watch();
+    const { exitCode, document } = await script(["queue", await twoImages()], {
+      fetch: watched.fetch,
+    });
+    expect(exitCode).toBe(0);
+    expect(count("media")).toBe(2);
+    expect(watched.mediaIds).toHaveLength(2);
+    expect(watched.posts).toHaveLength(2);
+    for (const post of watched.posts) {
+      expect(post.mediaIds).toEqual(watched.mediaIds);
+      expect(post).not.toHaveProperty("mediaId");
+      expect(post).not.toHaveProperty("type");
+    }
+    expect(statuses(document.results)).toEqual({ li1: 200, ig1: 200 });
+  });
+
+  it("keeps a job with the one-image form `image` working", async () => {
+    const watched = watch();
+    await script(["queue", await writeJob({ channels: ["li1"] })], {
+      fetch: watched.fetch,
+    });
+    expect(watched.mediaIds).toHaveLength(1);
+    expect(watched.posts[0].mediaIds).toEqual(watched.mediaIds);
+  });
+
+  it("prints the images in order and requests nothing on preview", async () => {
+    const { document } = await script(["preview", await twoImages()]);
+    expect(document).toMatchObject({
+      type: "post",
+      text: "Hello from the job",
+      images: ["post.png", "second.png"],
+    });
+    expect(seen).toHaveLength(0);
+  });
+
+  it("prints the Worker's refusal of one channel and still posts to the others", async () => {
+    standIn.answer = (request) =>
+      request.path === "/api/buffer/posts" && count("posts") === 1
+        ? Response.json(
+            { message: "This channel takes one image in a post." },
+            { status: 400 },
+          )
+        : undefined;
+    const { exitCode, document } = await script(["queue", await twoImages()]);
+    expect(exitCode).toBe(1);
+    expect(document.results[0]).toMatchObject({
+      status: 400,
+      response: { message: "This channel takes one image in a post." },
+    });
+    expect(document.results[1].status).toBe(200);
+  });
+
+  it("posts nothing when a later upload fails, and says so for every channel", async () => {
+    standIn.answer = (request) =>
+      request.path === "/api/buffer/media" && count("media") === 2
+        ? Response.json({ message: "Too large." }, { status: 413 })
+        : undefined;
+    const { exitCode, document } = await script(["queue", await twoImages()]);
+    expect(exitCode).toBe(1);
+    expect(count("posts")).toBe(0);
+    expect(document.results.map((r: Channel) => r.step)).toEqual([
+      "upload",
+      "upload",
+    ]);
+    expect(document.results[0]).toMatchObject({ status: 413 });
+  });
+
+  it.each([
+    ["the second position", ["post.png", "../outside.png"]],
+    ["the first position", ["../outside.png", "post.png"]],
+  ])("refuses an image outside the folder in %s before any request", async (_name, images) => {
+    await mkdir(path.join(dir, "inner"));
+    await writeFile(path.join(dir, "outside.png"), png());
+    await writeFile(path.join(dir, "inner", "post.png"), png());
+    await writeFile(
+      path.join(dir, "inner", "post.json"),
+      JSON.stringify({
+        name: "autumn-news",
+        text: "Hi",
+        images,
+        channels: ["li1"],
+      }),
+    );
+    const { exitCode, document } = await script(["queue", "inner/post.json"]);
+    expect(exitCode).toBe(1);
+    expect(document.error).toContain("is not inside the folder");
+    expect(seen).toHaveLength(0);
+  });
+
+  it("refuses an absolute path in the list, and a token in a path, before any request", async () => {
+    const absolute = await twoImages({
+      images: ["post.png", path.join(os.tmpdir(), "x.png")],
+    });
+    expect((await script(["queue", absolute])).document.error).toContain(
+      "has to be a path inside",
+    );
+    await writeFile(path.join(dir, `${clientSecret}.png`), png());
+    const leaked = await twoImages({
+      images: ["post.png", `${clientSecret}.png`],
+    });
+    for (const command of ["preview", "queue"])
+      expect((await script([command, leaked])).document.error).toBe(
+        "The text, a channel or an image path of the job contains the service token. Nothing was sent.",
+      );
+    expect(seen).toHaveLength(0);
+  });
+
+  it.each([
+    ["both image and images", { images: ["post.png"] }],
+    ["an empty list", { image: undefined, images: [] }],
+  ])("refuses a job with %s", async (_name, change) => {
+    const job = await writeJob({ channels: ["li1"], ...change });
+    const { exitCode } = await script(["queue", job]);
+    expect(exitCode).toBe(1);
+    expect(seen).toHaveLength(0);
+  });
+});
+
+describe("a story", () => {
+  const story = (change: Record<string, unknown> = {}) =>
+    writeJob({ type: "story", text: undefined, channels: ["ig1"], ...change });
+
+  it("is sent with type story, no text and one media id", async () => {
+    standIn.answer = (request) =>
+      request.path === "/api/buffer/posts"
+        ? Response.json({ postId: "story1" })
+        : undefined;
+    const watched = watch();
+    const { exitCode } = await script(["queue", await story()], {
+      fetch: watched.fetch,
+    });
+    expect(exitCode).toBe(0);
+    expect(watched.posts).toEqual([
+      {
+        requestId: expect.any(String),
+        mediaIds: watched.mediaIds,
+        channelId: "ig1",
+        type: "story",
+        mode: "addToQueue",
+      },
+    ]);
+  });
+
+  it("shows its type and no text on preview, and the token check does not need a text", async () => {
+    const { document } = await script(["preview", await story()]);
+    expect(document).toMatchObject({ type: "story", images: ["post.png"] });
+    expect(document).not.toHaveProperty("text");
+    expect(document.error).toBeUndefined();
+    expect(seen).toHaveLength(0);
+  });
+
+  it("prints whatever the Worker answers, accepted or refused", async () => {
+    const { exitCode, document } = await script(["queue", await story()]);
+    expect(exitCode === 0 || document.results[0].status >= 400).toBe(true);
+    expect(document.results[0].response).toBeDefined();
+  });
+
+  it.each([
+    ["a story with a text", { text: "Hi" }],
+    ["a post without a text", { type: "post", text: undefined }],
+    ["an unknown type", { type: "reel" }],
+  ])("refuses %s as a malformed job", async (_name, change) => {
+    const { exitCode, document } = await script(["queue", await story(change)]);
+    expect(exitCode).toBe(1);
+    expect(document.error).toMatch(/^The job is not valid/);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("has a request ID of its own, and a post keeps the one it always had", async () => {
+    const post = await script([
+      "preview",
+      await writeJob({ channels: ["ig1"] }),
+    ]);
+    const asStory = await script(["preview", await story()]);
+    expect(asStory.document.channels[0].requestId).not.toBe(
+      post.document.channels[0].requestId,
+    );
+    expect(post.document.channels[0].requestId).toBe(
+      "10cf1b5e-639e-8742-ab6b-5767057b1799",
+    );
   });
 });

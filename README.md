@@ -154,7 +154,7 @@ References: [Workers Routes](https://developers.cloudflare.com/workers/configura
 
 ## Queueing a post from the command line
 
-`scripts/queuePost.mjs` queues one post on the channels a job names, as a service identity. It runs on Node 24+ with the repository's dependencies installed, and it does four things: reads the service token, reads the job, uploads the image once, and sends one post per channel, printing what the Worker answered. The Worker validates every request (text, image, channel, mode); the script only keeps the token secret, keeps the image inside the job's folder and reports.
+`scripts/queuePost.mjs` queues one post on the channels a job names, as a service identity. It runs on Node 24+ with the repository's dependencies installed, and it does four things: reads the service token, reads the job, uploads each image once, and sends one post (or story) per channel, printing what the Worker answered. The Worker validates every request (text, images, channel, mode, type); the script only keeps the token secret, keeps the images inside the job's folder and reports.
 
 ```sh
 node scripts/queuePost.mjs check
@@ -165,8 +165,8 @@ node scripts/queuePost.mjs queue job.json
 | Command | What it does |
 | --- | --- |
 | `check` | Asks for the session and prints the Worker's answer: the service and the channels, with the channel IDs a job uses. |
-| `preview` | Reads the job and prints what `queue` would send: the text, the image and the request ID of each channel. Nothing is requested, uploaded or posted. |
-| `queue` | Uploads the image once and creates a post in mode `addToQueue` on each channel of the job. |
+| `preview` | Reads the job and prints what `queue` would send: the type, the text (a post only), the images in order and the request ID of each channel. Nothing is requested, uploaded or posted. |
+| `queue` | Uploads each image once, in the job's order, and creates a post (or a story) in mode `addToQueue` on each channel of the job. |
 
 There is no command for "now" and none for a chosen time. `--credential <name>` may be added to any of them, see [The token](#the-token). The script talks to `https://console.gi.org.pl` only, sends no `Origin` header, follows no redirect and gives up on a request after 60 seconds.
 
@@ -176,23 +176,36 @@ There is no command for "now" and none for a chosen time. `--credential <name>` 
 {
   "name": "autumn-news",
   "text": "The text of the post.",
-  "image": "square.png",
+  "images": ["first.png", "second.png"],
   "channels": ["BUFFER_CHANNEL_ID", "ANOTHER_CHANNEL_ID"]
+}
+```
+
+A story has a `type`, no text and one image:
+
+```json
+{
+  "name": "autumn-story",
+  "type": "story",
+  "image": "story.png",
+  "channels": ["INSTAGRAM_CHANNEL_ID"]
 }
 ```
 
 | Key | Meaning |
 | --- | --- |
 | `name` | The name of the post: 3 to 64 lower-case letters, digits and hyphens. It decides what counts as the same post, see [A second run](#a-second-run). |
-| `text` | The text for every channel, as the job has it; the Worker trims leading and trailing whitespace before it publishes, and `preview` shows the text untrimmed. |
-| `image` | A PNG as a path inside the folder of the job, the same for every channel. An absolute path, a network path and anything that leaves the folder (also through a link) is refused. |
+| `type` | Optional: `post` (the default) or `story`. |
+| `text` | A post needs it, a story has none (a job that does it the other way round is refused as malformed). The text for every channel, as the job has it; the Worker trims leading and trailing whitespace before it publishes, and `preview` shows the text untrimmed. |
+| `images` | The PNGs of the post, in order, as paths inside the folder of the job, the same for every channel. At least one. Every path is checked: an absolute path, a network path and anything that leaves the folder (also through a link) is refused before anything is requested. |
+| `image` | One path, the same as `images` with one entry, so earlier jobs keep working. A job has `images` or `image`, not both. |
 | `channels` | The channel IDs the Worker knows (`check` prints them). At least one, none twice. |
 
-A key the script does not know stops the run before anything is requested. The text, the size and format of the image and the channels are checked by the Worker, which answers 400 or 403 for the channel it turns down.
+A key the script does not know stops the run before anything is requested. The script checks nothing else: how many images a network takes, which networks have stories, whether a story may carry a text, the size and format of an image and the channels are the Worker's rules. It sends the request anyway and prints the Worker's 400 or 403 in that channel's entry; the other channels still get theirs, and the exit code is 1. Whether a service may queue stories at all is the Worker's policy too (`SERVICE_POST_TYPES`); where it does not, a story gets 403.
 
 ### A second run
 
-The script keeps no state. The request ID of a channel is derived from the Client ID, the name of the post and the channel, so every run of the same post sends the same IDs, and the Worker decides what happens: it reserves an ID before it calls Buffer and never creates a second post under it. The image is uploaded again and gets a new media ID, so the Worker answers a repeat with 409 and creates nothing. A changed text under the same name ends the same way: a new post needs a new name. After a run in which one channel was refused, run the same job again: the channels that have their post answer 409, the other one is created.
+The script keeps no state. The request ID of a channel is derived from the Client ID, the name of the post and the channel, so every run of the same post sends the same IDs, and the Worker decides what happens: it reserves an ID before it calls Buffer and never creates a second post under it. The images are uploaded again and get new media IDs, so the Worker answers a repeat with 409 and creates nothing; that holds for several images and for stories as well. A story gets a request ID of its own, so it never collides with a post of the same name on the same channel. A changed text under the same name ends the same way: a new post needs a new name. After a run in which one channel was refused, run the same job again: the channels that have their post answer 409, the other one is created.
 
 ### The output
 
@@ -210,7 +223,7 @@ One JSON document on stdout:
 }
 ```
 
-Per channel, `status` is the HTTP status of the Worker and `response` what it said. `step` is `post`, or `upload` when the image was not uploaded and so nothing was posted (then `status` and `response` are the upload's). Status `0` means no answer (the connection broke or the 60 seconds passed); for a post that means the post may exist, so look in Buffer before anything else - running the job again cannot create a second one. `check` has one result with `step: "session"`; `preview` has `name`, `text`, `image` and `channels` instead of `results`; a failure of the script itself is `{ "ok": false, "command": ..., "error": "..." }` with the command as far as the arguments were understood (otherwise `null`). The exit code is 0 only when `ok` is true: no error, and every request answered with a 2xx status.
+Per channel, `status` is the HTTP status of the Worker and `response` what it said. `step` is `post`, or `upload` when an image was not uploaded and so nothing was posted (then `status` and `response` are the upload's). Status `0` means no answer (the connection broke or the 60 seconds passed); for a post that means the post may exist, so look in Buffer before anything else - running the job again cannot create a second one. `check` has one result with `step: "session"`; `preview` has `name`, `type`, `text` (a post only), `images` and `channels` instead of `results`; a failure of the script itself is `{ "ok": false, "command": ..., "error": "..." }` with the command as far as the arguments were understood (otherwise `null`). The exit code is 0 only when `ok` is true: no error, and every request answered with a 2xx status.
 
 ### The token
 

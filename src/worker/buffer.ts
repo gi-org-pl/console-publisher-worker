@@ -1,4 +1,8 @@
-import { bufferResultSchema, type PublishInput } from "../schemas/publishing";
+import {
+  bufferResultSchema,
+  type PublishInput,
+  postMediaIds,
+} from "../schemas/publishing";
 import { mediaUrl } from "./media";
 import type { Channel, Env } from "./types";
 
@@ -21,13 +25,32 @@ function channelMetadata(channel: Channel): object | undefined {
   }
 }
 
+/**
+ * How many images one post may carry, per network. Instagram (a carousel) and
+ * LinkedIn are the numbers Buffer's help pages gave on 2026-10-12. Buffer names
+ * none for Facebook, so it gets the lower of the two. A network that is not
+ * listed keeps to one image until its limit is looked up.
+ */
+const MAX_IMAGES: Partial<Record<Channel["service"], number>> = {
+  instagram: 10,
+  facebook: 10,
+  linkedin: 20,
+};
+
+export function maxImages(channel: Channel): number {
+  return MAX_IMAGES[channel.service] ?? 1;
+}
+
 /** Send one mutation. Callers must reserve its request ID before invoking this. */
 export async function createBufferPost(
   env: Env,
   input: PublishInput,
   channel: Channel,
 ): Promise<string> {
-  const imageUrl = mediaUrl(env, input.mediaId);
+  // One entry per image, in the order given: Buffer shows them in that order.
+  const assets = postMediaIds(input).map((mediaId) => ({
+    image: { url: mediaUrl(env, mediaId) },
+  }));
   const metadata = channelMetadata(channel);
   const response = await fetch("https://api.buffer.com", {
     method: "POST",
@@ -47,7 +70,7 @@ export async function createBufferPost(
           schedulingType: "automatic",
           needsApproval: false,
           saveToDraft: false,
-          assets: [{ image: { url: imageUrl } }],
+          assets,
           ...(metadata ? { metadata } : {}),
         },
       },

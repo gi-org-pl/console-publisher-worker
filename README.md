@@ -14,7 +14,7 @@ Console calls these same-origin routes:
 
 An operator is a person signed in through Cloudflare Access. A service is an automation that presents a Cloudflare Access service token; see [Service tokens for automation](#service-tokens-for-automation). Both go through the same Access application - there is no route that bypasses it.
 
-The Buffer key exists only as a Worker secret. The `CHANNELS_JSON` setting is a server-side allowlist. Each post uses one PNG and one channel, with immediate publishing, the Buffer queue, or a scheduled time up to 30 days ahead. The image is not published until the operator submits the Console form. A service has a narrower set of options; see [Publishing restrictions](#publishing-restrictions).
+The Buffer key exists only as a Worker secret. The `CHANNELS_JSON` setting is a server-side allowlist. Each post goes to one channel and carries one PNG or several (see [Several images](#several-images)), with immediate publishing, the Buffer queue, or a scheduled time up to 30 days ahead. The image is not published until the operator submits the Console form. A service has a narrower set of options; see [Publishing restrictions](#publishing-restrictions).
 
 ## Buffer setup
 
@@ -36,7 +36,7 @@ The Buffer key exists only as a Worker secret. The `CHANNELS_JSON` setting is a 
    }
    ```
 
-4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram and Facebook feed posts (Buffer requires a post type for both); Stories, Reels, videos, carousels, and other platform-specific metadata are not implemented.
+4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram and Facebook feed posts (Buffer requires a post type for both); Stories, Reels, videos, and other platform-specific metadata are not implemented.
 
 Buffer Free has limits on channels, queued posts, API calls, and seats; verify the [current plan limits](https://buffer.com/pricing) before expanding use. This design uses one designated operator and one Buffer account/API key. Access identities do not become separate Buffer users.
 
@@ -49,6 +49,22 @@ The `wrangler.jsonc` routes attach this Worker only to `/api/buffer/*` and `/buf
 Create one **Self-hosted** Cloudflare Access application for `console.gi.org.pl/api/buffer/*`. Its Allow policy should name the designated operator's exact email. Choose your identity provider or email one-time PIN. Do not add an Everyone allow policy. Copy the application's Audience (AUD) tag into `ACCESS_AUD` and your HTTPS team domain into `ACCESS_TEAM_DOMAIN`. The Worker independently verifies the Access JWT signature, issuer, audience, expiry, and identity.
 
 Do **not** protect `/buffer-media/*` with that Access application: Buffer must fetch PNGs without a browser cookie. The Worker allows only GET/HEAD for UUID PNG paths there. Anyone holding a media URL can read that image, so upload only publication-ready graphics. The private R2 bucket has no public bucket endpoint.
+
+## Several images
+
+`POST /api/buffer/posts` takes the images of a post in one of two ways, never both:
+
+| Field | Meaning |
+| --- | --- |
+| `mediaIds` | An ordered list of media IDs, one to twenty. Buffer gets one asset per image, in this order. No ID may be listed twice. |
+| `mediaId` | One media ID - the form from before a post could carry several. It stays accepted, so a Console build or a client that knows no list keeps working. |
+
+- **Every image is uploaded on its own** through `/api/buffer/media`, as before: PNG only, up to 5 MB and 4096 px. Each has to exist and belong to the caller; one that does not refuses the whole post with 403 before Buffer is called.
+- **Limit per network:** Instagram 10 (a carousel), LinkedIn 20, Facebook 10; every other network 1. A longer list is refused with 400. The numbers for Instagram and LinkedIn are from Buffer's help pages (read on 2026-10-12); Buffer names none for Facebook, which got the lower of the two; the other networks were not looked up. They live in `MAX_IMAGES` in `src/worker/buffer.ts`.
+- **Instagram** shows the images of a carousel in the aspect ratio of the first one and crops the others to it, so the images of one post should share a format.
+- **Retries:** the receipt of a request covers the whole list and its order. The same request ID with the same list returns the same post; with a list that differs in any way it returns 409.
+- **Services:** nothing new is open to a service. The modes, the lead time and the channel list apply to a post with several images exactly as to one.
+- **Storage:** Buffer fetches every image when the post goes out, not when it is created, so all images of a queued or scheduled post have to stay in R2 until then. The lifecycle rule under [R2 and deployment](#r2-and-deployment) covers that as long as it is longer than the furthest schedule (30 days).
 
 ## Service tokens for automation
 

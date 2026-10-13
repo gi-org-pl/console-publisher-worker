@@ -891,3 +891,135 @@ describe("Given a post with several images", () => {
     expect(sentAssets()).toEqual(urls(images));
   });
 });
+
+describe("Given a story", () => {
+  const { text: _caption, ...withoutText } = input;
+  const story = { ...withoutText, type: "story" };
+  const sent = (call = 0) =>
+    JSON.parse(post.mock.calls[call][1].body).variables.input;
+  const onChannel = (service: string) => {
+    env.CHANNELS_JSON = JSON.stringify([
+      { id: "allowed", name: "Channel", service },
+    ]);
+  };
+
+  it("creates an Instagram story without a caption and keeps it out of the feed", async () => {
+    expect(await (await send(story)).json()).toEqual({ postId: "post1" });
+    expect(sent()).toMatchObject({
+      mode: "addToQueue",
+      schedulingType: "automatic",
+      assets: [{ image: { url: `${origin}/buffer-media/${mediaId}.png` } }],
+      metadata: { instagram: { type: "story", shouldShareToFeed: false } },
+    });
+    expect(sent()).not.toHaveProperty("text");
+  });
+
+  it("creates a Facebook story", async () => {
+    onChannel("facebook");
+    expect((await send(story)).status).toBe(200);
+    expect(sent().metadata).toEqual({ facebook: { type: "story" } });
+  });
+
+  it("creates a feed post exactly as before when the type is left out or is post", async () => {
+    expect((await send()).status).toBe(200);
+    expect(
+      (await send({ ...input, requestId: crypto.randomUUID(), type: "post" }))
+        .status,
+    ).toBe(200);
+    for (const call of [0, 1]) {
+      expect(sent(call)).toMatchObject({
+        text: "Hello",
+        metadata: { instagram: { type: "post", shouldShareToFeed: true } },
+      });
+    }
+  });
+
+  it("schedules a story like a post", async () => {
+    const dueAt = new Date(Date.now() + 3_600_000).toISOString();
+    expect(
+      (await send({ ...story, mode: "customScheduled", dueAt })).status,
+    ).toBe(200);
+    expect(sent()).toMatchObject({ mode: "customScheduled", dueAt });
+  });
+
+  it.each([
+    "linkedin",
+    "threads",
+    "twitter",
+  ])("refuses a story for %s with 400, and Buffer is not called", async (service) => {
+    onChannel(service);
+    const response = await send(story);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      message: "This channel has no stories.",
+    });
+    expect(post).not.toHaveBeenCalled();
+    expect(objects.has(`receipts/${requestId}`)).toBe(false);
+  });
+
+  it.each([
+    ["a story with a caption", { ...story, text: "Hello" }],
+    ["a story with an empty caption", { ...story, text: "" }],
+    ["a post without a text", withoutText],
+    ["a post without a text, named as one", { ...withoutText, type: "post" }],
+    ["a type that is not known", { ...input, type: "reel" }],
+  ])("refuses %s with 400 before anything else", async (_name, body) => {
+    expect((await send(body)).status).toBe(400);
+    expect(post).not.toHaveBeenCalled();
+    expect(env.MEDIA.put).not.toHaveBeenCalled();
+  });
+
+  it("takes one image only", async () => {
+    const second = "11111111-1111-4111-8111-111111111111";
+    objects.set(`images/${second}`, {
+      value: png(),
+      customMetadata: { owner: "user1" },
+    });
+    const { mediaId: _single, ...withoutImage } = story;
+
+    const response = await send({
+      ...withoutImage,
+      mediaIds: [mediaId, second],
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      message: "A story takes one image.",
+    });
+    expect(post).not.toHaveBeenCalled();
+
+    expect(
+      (
+        await send({
+          ...withoutImage,
+          requestId: crypto.randomUUID(),
+          mediaIds: [mediaId],
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  it("returns the same story for a retry and 409 when the request turns into a post", async () => {
+    expect((await send(story)).status).toBe(200);
+    expect(await (await send(story)).json()).toEqual({ postId: "post1" });
+    expect((await send(input)).status).toBe(409);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("is not open to a service, which keeps its posts", async () => {
+    asService();
+    const refused = await sendAsService(story);
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({
+      message: "A service may not create a story.",
+    });
+    expect(post).not.toHaveBeenCalled();
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining('"action":"service-post-denied"'),
+    );
+
+    expect(
+      (await sendAsService({ ...input, requestId: crypto.randomUUID() }))
+        .status,
+    ).toBe(200);
+  });
+});

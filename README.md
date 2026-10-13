@@ -36,7 +36,7 @@ The Buffer key exists only as a Worker secret. The `CHANNELS_JSON` setting is a 
    }
    ```
 
-4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram and Facebook feed posts (Buffer requires a post type for both); Stories, Reels, videos, and other platform-specific metadata are not implemented.
+4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram and Facebook feed posts and stories (Buffer requires a post type for both; see [Stories](#stories)); Reels, videos, and other platform-specific metadata are not implemented.
 
 Buffer Free has limits on channels, queued posts, API calls, and seats; verify the [current plan limits](https://buffer.com/pricing) before expanding use. This design uses one designated operator and one Buffer account/API key. Access identities do not become separate Buffer users.
 
@@ -65,6 +65,20 @@ Do **not** protect `/buffer-media/*` with that Access application: Buffer must f
 - **Retries:** the receipt of a request covers the whole list and its order. The same request ID with the same list returns the same post; with a list that differs in any way it returns 409.
 - **Services:** nothing new is open to a service. The modes, the lead time and the channel list apply to a post with several images exactly as to one.
 - **Storage:** Buffer fetches every image when the post goes out, not when it is created, so all images of a queued or scheduled post have to stay in R2 until then. The lifecycle rule under [R2 and deployment](#r2-and-deployment) covers that as long as it is longer than the furthest schedule (30 days).
+
+## Stories
+
+`POST /api/buffer/posts` takes an optional `type`: `post` (the default, also when the field is left out) or `story`.
+
+- **Networks:** a story is accepted for Instagram and Facebook channels only. For any other channel the request is refused with 400 and Buffer is not called.
+- **No caption:** a story is sent without `text`; a story that carries one is refused with 400, and so is a post without one. Buffer publishes an image story by itself only when it has no text, link or sticker - those need its reminder flow on a phone, which the Worker does not use (`schedulingType` stays `automatic`).
+- **One image:** a story takes one image. Several would be several frames of a story; that was not asked for and not tried.
+- **Format:** the Worker does not check the 9:16 ratio. Buffer calls it the suggested ratio, not a required one, and Console sends its 9:16 format.
+- **Instagram:** the story is not shared to the feed (`shouldShareToFeed: false`).
+- **Modes:** the queue, now and a chosen time work as for posts.
+- **Services:** a service may not create a story (403, with a `service-post-denied` log line). The types open to a service are listed in `SERVICE_POST_TYPES`; a story is public like a post, so opening it is a one-word change once someone decides to.
+- **A post and a story of the same material** are two requests with two request IDs.
+- Buffer publishes an Instagram story automatically only for a professional (Business or Creator) account. For another account it falls back to a reminder on a phone with the Buffer app, and the post does not go out by itself.
 
 ## Service tokens for automation
 
@@ -111,6 +125,7 @@ A service reads content that other people control - chat messages, issues, web p
 | Restriction | Behaviour | Configuration |
 | --- | --- | --- |
 | Modes | Only `addToQueue` and `customScheduled`. `shareNow` returns 403. | Fixed in code (`SERVICE_MODES`) |
+| Post types | Only `post`. A `story` returns 403. | Fixed in code (`SERVICE_POST_TYPES`) |
 | Lead time | A `customScheduled` post must be due at least 120 minutes from now, so a person has time to pull it back in Buffer. Earlier times return 400. Operators keep their one-minute minimum. | `minScheduleLeadMinutes` per service, 1 to 43199 |
 | Channels | By default every channel in `CHANNELS_JSON`. With a list, only those channels are returned by `/api/buffer/session` and accepted by `/api/buffer/posts`; others return 403. The list can narrow `CHANNELS_JSON` but never add to it. | `channelIds` per service, optional |
 

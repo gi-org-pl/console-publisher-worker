@@ -914,10 +914,18 @@ describe("Given a story", () => {
     expect(sent()).not.toHaveProperty("text");
   });
 
-  it("creates a Facebook story", async () => {
+  it("refuses a story for Facebook with 400 before anything is sent to Buffer, and keeps its feed posts", async () => {
     onChannel("facebook");
-    expect((await send(story)).status).toBe(200);
-    expect(sent().metadata).toEqual({ facebook: { type: "story" } });
+    const response = await send(story);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      message: "This channel has no stories.",
+    });
+    expect(post).not.toHaveBeenCalled();
+    expect(objects.has(`receipts/${requestId}`)).toBe(false);
+
+    expect((await send()).status).toBe(200);
+    expect(sent().metadata).toEqual({ facebook: { type: "post" } });
   });
 
   it("creates a feed post exactly as before when the type is left out or is post", async () => {

@@ -36,7 +36,7 @@ The Buffer key exists only as a Worker secret. The `CHANNELS_JSON` setting is a 
    }
    ```
 
-4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram and Facebook feed posts and stories (Buffer requires a post type for both; see [Stories](#stories)); Reels, videos, and other platform-specific metadata are not implemented.
+4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram and Facebook feed posts (Buffer requires a post type for both) and Instagram stories (see [Stories](#stories)); Facebook stories, Reels, videos, and other platform-specific metadata are not implemented.
 
 Buffer Free has limits on channels, queued posts, API calls, and seats; verify the [current plan limits](https://buffer.com/pricing) before expanding use. This design uses one designated operator and one Buffer account/API key. Access identities do not become separate Buffer users.
 
@@ -70,7 +70,7 @@ Do **not** protect `/buffer-media/*` with that Access application: Buffer must f
 
 `POST /api/buffer/posts` takes an optional `type`: `post` (the default, also when the field is left out) or `story`.
 
-- **Networks:** a story is accepted for Instagram and Facebook channels only. For any other channel the request is refused with 400 and Buffer is not called.
+- **Networks:** a story is accepted for Instagram channels only. For any other channel, a Facebook one among them, the request is refused with 400 and Buffer is not called. Buffer publishes a story to a Facebook Page only through a notification on a phone, which the Worker does not use.
 - **No caption:** a story is sent without `text`; a story that carries one is refused with 400, and so is a post without one. Buffer publishes an image story by itself only when it has no text, link or sticker - those need its reminder flow on a phone, which the Worker does not use (`schedulingType` stays `automatic`).
 - **One image:** a story takes one image. Several would be several frames of a story; that was not asked for and not tried.
 - **Format:** the Worker does not check the 9:16 ratio. Buffer calls it the suggested ratio, not a required one, and Console sends its 9:16 format.

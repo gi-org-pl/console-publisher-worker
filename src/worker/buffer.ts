@@ -15,8 +15,13 @@ const mutation = `mutation CreatePost($input: CreatePostInput!) {
   }
 }`;
 
-/** The networks that have stories; Buffer takes the type in their metadata. */
-const STORY_SERVICES: readonly Channel["service"][] = ["instagram", "facebook"];
+/**
+ * The networks a story can be sent to; Buffer takes the type in their
+ * metadata. Facebook is not one of them: Buffer publishes a story to a
+ * Facebook Page only through a notification on a phone, which the Worker does
+ * not use.
+ */
+const STORY_SERVICES: readonly Channel["service"][] = ["instagram"];
 
 export function hasStories(channel: Channel): boolean {
   return STORY_SERVICES.includes(channel.service);
@@ -29,7 +34,8 @@ function channelMetadata(channel: Channel, type: PostType): object | undefined {
       // A story is not a feed post, so it is not shared to the feed.
       return { instagram: { type, shouldShareToFeed: type === "post" } };
     case "facebook":
-      return { facebook: { type } };
+      // Always a feed post: a story for Facebook is refused before this.
+      return { facebook: { type: "post" } };
     default:
       return undefined;
   }

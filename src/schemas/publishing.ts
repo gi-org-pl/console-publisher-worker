@@ -155,6 +155,11 @@ export const announcementInputSchema = z
       .min(1)
       .max(ANNOUNCEMENT_MAX_POSTS)
       .refine(uniqueIds, "A post is listed twice."),
+    /**
+     * The text the posts were queued with. When given, every post has to
+     * carry it, so a changed post under an old request ID is not announced.
+     */
+    postText: z.string().trim().min(1).max(5000).optional(),
   })
   .strict();
 export type AnnouncementInput = z.infer<typeof announcementInputSchema>;

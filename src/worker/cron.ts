@@ -222,9 +222,29 @@ async function processAnnouncement(run: Run, key: string): Promise<boolean> {
     return true;
   }
   const at = new Date(run.now).toISOString();
-
-  if (run.now - Date.parse(announcement.createdAt) > MAX_PENDING_MS) {
+  try {
+    return await checkAnnouncement(run, announcement, object.etag, at);
+  } catch (cause) {
+    // Counted as looked at, so one that keeps failing moves behind the others
+    // instead of taking every run's requests. A write that misses (the
+    // announcement changed, or R2 refuses it) changes nothing.
     await update(run, announcement, object.etag, {
+      status: "pending",
+      checkedAt: at,
+      lastError: cause instanceof Error ? cause.message : String(cause),
+    }).catch(() => undefined);
+    throw cause;
+  }
+}
+
+async function checkAnnouncement(
+  run: Run,
+  announcement: Announcement,
+  etag: string,
+  at: string,
+): Promise<boolean> {
+  if (run.now - Date.parse(announcement.createdAt) > MAX_PENDING_MS) {
+    await update(run, announcement, etag, {
       status: "expired",
       closedAt: at,
     });
@@ -254,14 +274,14 @@ async function processAnnouncement(run: Run, key: string): Promise<boolean> {
 
   const sent = posts.find((post) => post.status === "sent");
   if (sent) {
-    await deliver(run, looked, object.etag, sent);
+    await deliver(run, looked, etag, sent);
     return true;
   }
 
   if (
     posts.every((post) => post.status === "deleted" || post.status === "error")
   ) {
-    await update(run, looked, object.etag, {
+    await update(run, looked, etag, {
       status: "cancelled",
       closedAt: at,
     });
@@ -273,7 +293,7 @@ async function processAnnouncement(run: Run, key: string): Promise<boolean> {
   }
 
   // Still waiting, possibly at a new time: keep what Buffer said.
-  await update(run, looked, object.etag, { status: "pending" });
+  await update(run, looked, etag, { status: "pending" });
   return true;
 }
 

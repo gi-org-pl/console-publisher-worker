@@ -542,6 +542,19 @@ describe("Given an announcement to register", () => {
     const response = await announce({ postRequestIds: [unconfirmed] });
     expect(response.response.status).toBe(409);
   });
+  it("refuses posts queued with another text than the one given", async () => {
+    // queuePosts queues "The full post".
+    expect(
+      (await announce({ postText: "The full post" })).response.status,
+    ).toBe(200);
+    const edited = await announce({ postText: "An edited post" });
+    expect(edited.response.status).toBe(409);
+    expect(await edited.response.json()).toEqual({
+      message:
+        "One of the posts was queued with another text. A changed post needs a new name.",
+    });
+    expect(stored(edited.body.requestId)).toBeUndefined();
+  });
   it("answers a retry with the same result and refuses changed content under the same ID", async () => {
     const { body, response } = await announce();
     const first = await response.json();
@@ -981,6 +994,20 @@ describe("Given the scheduled run", () => {
     await runCron(at(3 * HOUR));
     expect(stored(body.requestId).status).toBe("posted");
     expect(discordForms).toHaveLength(1);
+  });
+  it("counts a failed check as a look, so it moves behind the others", async () => {
+    const body = await registered();
+    bufferPosts.set("post1", () => new Response("down", { status: 502 }));
+    const run = at(2 * HOUR);
+    await runCron(run);
+    expect(stored(body.requestId)).toMatchObject({
+      status: "pending",
+      checkedAt: new Date(run).toISOString(),
+      lastError: "Buffer HTTP 502",
+    });
+    expect(
+      objects.get(`announcements/${body.requestId}.json`)?.customMetadata,
+    ).toEqual({ status: "pending", checkedAt: new Date(run).toISOString() });
   });
   it("retries on the next run when Discord refuses, and posts once", async () => {
     const body = await registered();

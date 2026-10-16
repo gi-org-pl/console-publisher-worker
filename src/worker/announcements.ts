@@ -124,6 +124,16 @@ function summary(announcement: Announcement) {
   };
 }
 
+/** The text a post was queued with; its receipt holds the request as it came. */
+function receiptText(postFingerprint: string): string | undefined {
+  try {
+    const text = JSON.parse(postFingerprint)?.text;
+    return typeof text === "string" ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function fingerprint(input: AnnouncementInput): string {
   return JSON.stringify(input);
 }
@@ -297,6 +307,15 @@ export async function registerAnnouncement(
     if (!receipt?.postId) {
       return error(
         "Buffer did not confirm one of the posts. Check Buffer before announcing it.",
+        409,
+      );
+    }
+    if (
+      input.postText !== undefined &&
+      receiptText(receipt.fingerprint) !== input.postText
+    ) {
+      return error(
+        "One of the posts was queued with another text. A changed post needs a new name.",
         409,
       );
     }

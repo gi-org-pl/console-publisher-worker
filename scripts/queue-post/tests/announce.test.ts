@@ -223,6 +223,32 @@ describe("queue with an announcement", () => {
     );
     expect(stored?.posts).toHaveLength(2);
   });
+  it("is not registered for the old posts when the job was edited under the same name", async () => {
+    const job = await writeAnnounceJob();
+    standIn.answer = (request) =>
+      request.path === "/api/buffer/announcements"
+        ? new Response("unavailable", { status: 503 })
+        : undefined;
+    expect((await script(["queue", job])).exitCode).toBe(1);
+
+    standIn.answer = () => undefined;
+    await writeAnnounceJob({
+      text: "An edited post",
+      announce: { ...announce, text: "An edited announcement" },
+    });
+    const { exitCode, document } = await script(["queue", job]);
+    expect(exitCode).toBe(1);
+    expect(document.announcement).toMatchObject({
+      status: 409,
+      response: {
+        message:
+          "One of the posts was queued with another text. A changed post needs a new name.",
+      },
+    });
+    expect(
+      await storedAnnouncement(document.announcement.requestId),
+    ).toBeNull();
+  });
   it("posts nothing when an image of the announcement fails to upload", async () => {
     const job = await writeAnnounceJob();
     standIn.answer = (request) =>

@@ -303,16 +303,23 @@ async function execute(argv, deps, secrets, document) {
       announce,
       announced.mediaIds,
       results,
+      job.text,
     ),
   };
 }
 
 /**
  * Registers the announcement for the posts that exist: those created now
- * (200) and those an earlier run created (409). The Worker posts it to
- * Discord once one of them has gone out.
+ * (200) and those an earlier run created (409), as long as they carry the
+ * job's text. The Worker posts it to Discord once one of them has gone out.
  */
-async function registerAnnouncement(context, announce, mediaIds, results) {
+async function registerAnnouncement(
+  context,
+  announce,
+  mediaIds,
+  results,
+  postText,
+) {
   const { requestId } = announce;
   const postRequestIds = results
     .filter(
@@ -336,6 +343,9 @@ async function registerAnnouncement(context, announce, mediaIds, results) {
         text: announce.text,
         mediaIds,
         postRequestIds,
+        // A 409 is also what a post edited under the same name gets; with the
+        // text the Worker tells the two apart and refuses the edited one.
+        postText,
       }),
     })),
   };

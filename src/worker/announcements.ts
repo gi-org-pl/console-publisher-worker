@@ -162,53 +162,76 @@ async function replay(
 }
 
 /**
- * Lets go of the claims this announcement ID holds on the given posts, except
- * for the posts a stored announcement under this ID names. Called when a
- * registration ends without storing its announcement.
+ * How long a claim counts without an announcement that names its post: long
+ * enough for a registration in progress, after which the claim was left by
+ * one that stopped or lost a race.
  */
-async function releaseClaims(
+const CLAIM_HOLD_MS = 60_000;
+
+/**
+ * Whether another announcement's claim on a post still counts: its
+ * announcement is stored and names the post, or the claim is too recent to
+ * tell. Claims are never deleted, so one left behind is simply taken over.
+ */
+async function claimCounts(
   env: Env,
-  input: AnnouncementInput,
-  postRequestIds: string[],
-) {
-  const object = await env.MEDIA.get(announcementKey(input.requestId));
+  announcementId: string | undefined,
+  postRequestId: string,
+  uploaded: Date,
+): Promise<boolean> {
+  if (Date.now() - uploaded.getTime() < CLAIM_HOLD_MS) {
+    return true;
+  }
+  const object = announcementId
+    ? await env.MEDIA.get(announcementKey(announcementId))
+    : null;
   const stored = object && announcementSchema.safeParse(await object.json());
-  const named = new Set(
-    stored?.success ? stored.data.posts.map((post) => post.requestId) : [],
-  );
-  await Promise.all(
-    postRequestIds
-      .filter((postRequestId) => !named.has(postRequestId))
-      .map((postRequestId) => env.MEDIA.delete(claimKey(postRequestId))),
+  return Boolean(
+    stored?.success &&
+      stored.data.posts.some((post) => post.requestId === postRequestId),
   );
 }
 
 /**
  * Takes each post for this announcement. A post another announcement holds
- * refuses the whole request, and the posts this ID holds so far - taken now
- * or by an earlier attempt that stopped - are let go again.
+ * refuses the request; the posts taken before it keep a claim that stops
+ * counting after a minute.
  */
 async function claimPosts(
   env: Env,
   input: AnnouncementInput,
 ): Promise<boolean> {
-  const held: string[] = [];
+  const value = JSON.stringify({ announcementId: input.requestId });
   for (const postRequestId of input.postRequestIds) {
     const key = claimKey(postRequestId);
-    const value = JSON.stringify({ announcementId: input.requestId });
     if (
-      !(await env.MEDIA.put(key, value, { onlyIf: { etagDoesNotMatch: "*" } }))
+      await env.MEDIA.put(key, value, { onlyIf: { etagDoesNotMatch: "*" } })
     ) {
-      // Held already: by this ID after an interrupted attempt, or by another announcement.
-      const holder = await env.MEDIA.get(key);
-      const claim =
-        holder && (await holder.json<{ announcementId?: string }>());
-      if (claim?.announcementId !== input.requestId) {
-        await releaseClaims(env, input, held);
-        return false;
-      }
+      continue;
     }
-    held.push(postRequestId);
+    const holder = await env.MEDIA.get(key);
+    if (!holder) {
+      return false;
+    }
+    const claim = await holder.json<{ announcementId?: string }>();
+    // A claim of this ID is from an earlier attempt of the same request.
+    if (claim.announcementId === input.requestId) {
+      continue;
+    }
+    if (
+      (await claimCounts(
+        env,
+        claim.announcementId,
+        postRequestId,
+        holder.uploaded,
+      )) ||
+      // Taken over only if nobody else took it over meanwhile.
+      !(await env.MEDIA.put(key, value, {
+        onlyIf: { etagMatches: holder.etag },
+      }))
+    ) {
+      return false;
+    }
   }
   return true;
 }
@@ -283,7 +306,10 @@ export async function registerAnnouncement(
     return previous;
   }
   if (!(await claimPosts(env, input))) {
-    return error("One of the posts already has an announcement.", 409);
+    return error(
+      "One of the posts already has an announcement. A claim left by a registration that stopped is free again after a minute.",
+      409,
+    );
   }
 
   const announcement: Announcement = {
@@ -300,14 +326,10 @@ export async function registerAnnouncement(
   };
   if (!(await writeAnnouncement(env, announcement))) {
     // Another request with this ID got there first.
-    const answer =
+    return (
       (await replay(env, operator, input)) ??
-      error("This announcement was already registered.", 409);
-    if (answer.status !== 200) {
-      // Every post of this request was claimed under this ID to get here.
-      await releaseClaims(env, input, input.postRequestIds);
-    }
-    return answer;
+      error("This announcement was already registered.", 409)
+    );
   }
 
   logEvent("announcement-registered", {

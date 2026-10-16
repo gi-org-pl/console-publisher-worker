@@ -32,6 +32,7 @@ const DAY = 24 * HOUR;
 interface Stored {
   value: unknown;
   etag: string;
+  uploaded?: Date;
   customMetadata?: Record<string, string>;
 }
 type BufferAnswer = () => Response | Promise<Response>;
@@ -148,6 +149,16 @@ async function announce(changes: Record<string, unknown> = {}) {
   return { body, response };
 }
 
+/** Makes a claim older than the minute it counts without an announcement. */
+function age(postRequestId: string) {
+  const claim = objects.get(`announcement-posts/${postRequestId}`);
+  if (claim) claim.uploaded = new Date(Date.now() - 2 * 60_000);
+}
+function claimHolder(postRequestId: string) {
+  const claim = objects.get(`announcement-posts/${postRequestId}`);
+  return claim && JSON.parse(String(claim.value)).announcementId;
+}
+
 function stored(id: string) {
   const object = objects.get(`announcements/${id}.json`);
   return (
@@ -246,6 +257,7 @@ beforeEach(() => {
         return object
           ? {
               etag: object.etag,
+              uploaded: object.uploaded ?? new Date(),
               json: async () => JSON.parse(String(object.value)),
               arrayBuffer: async () =>
                 new Uint8Array(object.value as Uint8Array).buffer,
@@ -273,6 +285,7 @@ beforeEach(() => {
         objects.set(key, {
           value,
           etag,
+          uploaded: new Date(),
           customMetadata: options?.customMetadata,
         });
         return { key, etag };
@@ -538,7 +551,7 @@ describe("Given an announcement to register", () => {
     expect((await register({ ...body, text: "Changed" })).status).toBe(409);
     expect(stored(body.requestId).text).toBe(body.text);
   });
-  it("refuses a second announcement for a post and keeps the other posts free", async () => {
+  it("refuses a second announcement for a post; what it took is free after a minute", async () => {
     const { body } = await announce();
     const freshPost = (await queuePosts(["li"]))[0];
     const second = {
@@ -549,20 +562,25 @@ describe("Given an announcement to register", () => {
     const response = await register(second);
     expect(response.status).toBe(409);
     expect(stored(second.requestId)).toBeUndefined();
-    expect(objects.has(`announcement-posts/${freshPost}`)).toBe(false);
 
-    // The free post can still get an announcement of its own.
-    expect(
-      (
-        await register({
-          ...body,
-          requestId: crypto.randomUUID(),
-          postRequestIds: [freshPost],
-        })
-      ).status,
-    ).toBe(200);
+    const third = {
+      ...body,
+      requestId: crypto.randomUUID(),
+      postRequestIds: [freshPost],
+    };
+    // Within the minute the claim may be a registration in progress.
+    expect((await register(third)).status).toBe(409);
+    age(freshPost);
+    expect((await register(third)).status).toBe(200);
+    expect(claimHolder(freshPost)).toBe(third.requestId);
+
+    // The post the first announcement names stays its own, however old the claim.
+    age(body.postRequestIds[0]);
+    const fourth = { ...body, requestId: crypto.randomUUID() };
+    expect((await register(fourth)).status).toBe(409);
+    expect(claimHolder(body.postRequestIds[0])).toBe(body.requestId);
   });
-  it("lets go of its posts when a parallel request with the same ID and other posts wins", async () => {
+  it("frees the posts of a parallel request with the same ID that lost, after a minute", async () => {
     const first = await queuePosts(["li"]);
     const second = await queuePosts(["fb"]);
     const mediaIds = [await uploadImage()];
@@ -573,7 +591,7 @@ describe("Given an announcement to register", () => {
     ]);
     expect(results.map((result) => result.status).sort()).toEqual([200, 409]);
     const loser = stored(requestId).text === "One" ? second : first;
-    expect(objects.has(`announcement-posts/${loser[0]}`)).toBe(false);
+    age(loser[0]);
     expect(
       (
         await register({
@@ -585,7 +603,7 @@ describe("Given an announcement to register", () => {
       ).status,
     ).toBe(200);
   });
-  it("lets go of a post an interrupted attempt took when a retry meets a taken post", async () => {
+  it("frees a post that an attempt took before it stopped, after a minute", async () => {
     const { body } = await announce();
     const fresh = (await queuePosts(["li"]))[0];
     const requestId = crypto.randomUUID();
@@ -600,11 +618,76 @@ describe("Given an announcement to register", () => {
       postRequestIds: [fresh, body.postRequestIds[0]],
     });
     expect(retry.status).toBe(409);
-    expect(objects.has(`announcement-posts/${fresh}`)).toBe(false);
-    // The post held by the first announcement keeps its claim.
-    expect(objects.has(`announcement-posts/${body.postRequestIds[0]}`)).toBe(
-      true,
-    );
+
+    age(fresh);
+    const other = {
+      ...body,
+      requestId: crypto.randomUUID(),
+      postRequestIds: [fresh],
+    };
+    expect((await register(other)).status).toBe(200);
+  });
+  it("frees a post that an announcement stored under the same ID does not name", async () => {
+    const [x] = await queuePosts(["li"]);
+    const [y] = await queuePosts(["fb"]);
+    const mediaIds = [await uploadImage()];
+    const requestId = crypto.randomUUID();
+    // An attempt took x and stopped; then a request with the same ID stored y.
+    objects.set(`announcement-posts/${x}`, {
+      value: JSON.stringify({ announcementId: requestId }),
+      etag: "claim",
+    });
+    expect(
+      (await register({ requestId, text: "Y", mediaIds, postRequestIds: [y] }))
+        .status,
+    ).toBe(200);
+    // The first request again: a changed retry, refused.
+    expect(
+      (await register({ requestId, text: "X", mediaIds, postRequestIds: [x] }))
+        .status,
+    ).toBe(409);
+    age(x);
+    expect(
+      (
+        await register({
+          requestId: crypto.randomUUID(),
+          text: "X",
+          mediaIds,
+          postRequestIds: [x],
+        })
+      ).status,
+    ).toBe(200);
+  });
+  it("does not take over a claim someone else took over first", async () => {
+    const [post] = await queuePosts(["li"]);
+    objects.set(`announcement-posts/${post}`, {
+      value: JSON.stringify({ announcementId: crypto.randomUUID() }),
+      etag: "stale",
+    });
+    age(post);
+    const mediaIds = [await uploadImage()];
+    const real = env.MEDIA.put.bind(env.MEDIA);
+    // Another registration replaces the stale claim between the read and the takeover.
+    (env.MEDIA as unknown as { get: unknown }).get = (() => {
+      const get = (
+        env.MEDIA as unknown as { get: (key: string) => Promise<unknown> }
+      ).get;
+      return async (key: string) => {
+        const result = await get(key);
+        if (key === `announcement-posts/${post}` && result) {
+          await real(key, JSON.stringify({ announcementId: "someone" }));
+        }
+        return result;
+      };
+    })();
+    const response = await register({
+      requestId: crypto.randomUUID(),
+      text: "Late",
+      mediaIds,
+      postRequestIds: [post],
+    });
+    expect(response.status).toBe(409);
+    expect(claimHolder(post)).toBe("someone");
   });
   it("finishes a registration that stopped after taking its posts", async () => {
     const postRequestIds = await queuePosts();

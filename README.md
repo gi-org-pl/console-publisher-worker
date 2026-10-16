@@ -10,7 +10,10 @@ Console calls these same-origin routes:
 | `/api/buffer/session` | Operator or allowlisted service | Caller identity and approved channels |
 | `/api/buffer/media` | Operator or allowlisted service | Upload one generated PNG to private R2 |
 | `/api/buffer/posts` | Operator or allowlisted service | Create one Buffer post |
+| `/api/buffer/announcements` | Allowlisted service only | Register a Discord announcement for posts the service created; see [Discord announcements](#discord-announcements) |
 | `/buffer-media/<uuid>.png` | Public read | Let Buffer fetch an uploaded image |
+
+Besides these routes, a Cron Trigger runs the Worker once an hour to post the Discord announcements whose posts have gone out.
 
 An operator is a person signed in through Cloudflare Access. A service is an automation that presents a Cloudflare Access service token; see [Service tokens for automation](#service-tokens-for-automation). Both go through the same Access application - there is no route that bypasses it.
 
@@ -79,6 +82,94 @@ Do **not** protect `/buffer-media/*` with that Access application: Buffer must f
 - **Services:** a service may create a story, like a post. The modes, the lead time and the channel list apply to it exactly as to a post. The types open to a service are listed in `SERVICE_POST_TYPES`; a type that is not listed there is refused with 403 and a `service-post-denied` log line.
 - **A post and a story of the same material** are two requests with two request IDs.
 - Buffer publishes an Instagram story automatically only for a professional (Business or Creator) account. For another account it falls back to a reminder on a phone with the Buffer app, and the post does not go out by itself.
+
+## The time Buffer gives a post
+
+`POST /api/buffer/posts` answers `{ "postId": "...", "dueAt": "..." }`. `dueAt` is the time Buffer means to publish the post: the chosen time of a scheduled post, or the slot Buffer gave a queued one. It is left out when Buffer names none. The Worker reads it, with the post's `status`, from Buffer's [`Post`](https://developers.buffer.com/types/Post.md) type when it creates the post, and keeps both in the receipt. A replay of the same request returns the same answer.
+
+## Discord announcements
+
+Volunteers and friends on Discord already know the context of a post, so they get a short version of it on the announcements channel, after the post has gone out on the social networks. The Worker posts it; Buffer has no webhook and cannot publish to Discord. The proposal behind this is gi-org-pl/product#125.
+
+1. **The short version is registered when the post is queued.** The service that queues the posts (the foundation's bot, through [the queue script](#queueing-a-post-from-the-command-line)) sends the announcement right after them: a text, one to four images and the posts it belongs to.
+2. **A scheduled run publishes it.** Once an hour the Worker looks at the pending announcements, asks Buffer where their posts stand and, once the first of them has been sent, posts the announcement to Discord through a channel webhook.
+
+### Registering one
+
+`POST /api/buffer/announcements`, as JSON:
+
+| Field | Meaning |
+| --- | --- |
+| `requestId` | A UUID, the ID of the announcement. The same request again returns the same answer; different content under the same ID gets 409. |
+| `text` | The text of the Discord message, 1 to 1000 characters after trimming. Mentions in it ping nobody. |
+| `mediaIds` | One to four images uploaded through `/api/buffer/media` by the same service: one landscape graphic, or squares. A portrait image is refused with 400. They are attached in this order. |
+| `postRequestIds` | The request IDs the posts were created with: one per channel of the same post, one to ten. |
+
+The posts are named by their request IDs, not by Buffer's post IDs: the Worker looks each one up in its own receipts, so it knows that this service created it and which Buffer post it became. A post created by an operator or by another service is refused with 403; one whose creation Buffer never confirmed with 409. A post can belong to one announcement only; a second one that names it gets 409 and takes none of its posts. The answer is `{ "announcementId": "...", "status": "pending", "dueAt": "..." }`, `dueAt` being the earliest time Buffer named for the posts.
+
+Only an allowlisted service may register an announcement. An operator signed in through Access gets 403 and an `announcement-denied` log line, so Console cannot publish to Discord; a post created in Console has no announcement and produces nothing there. The [publishing restrictions](#publishing-restrictions) of a service hold for its posts as before; the announcement only follows them.
+
+The image size check uses the width and height that `/api/buffer/media` records with every upload; an image uploaded before that was recorded is refused with 400. Upload it again.
+
+### The scheduled run
+
+The Cron Trigger is set in `wrangler.jsonc`:
+
+```jsonc
+"triggers": { "crons": ["17 * * * *"] }
+```
+
+That is minute 17 of every hour, in UTC. Every two hours would be `"17 */2 * * *"`. A change takes effect with the next deploy. Each run:
+
+1. lists the announcements in R2 (`announcements/<id>.json`) whose status is `pending`;
+2. skips one whose earliest `dueAt` is still ahead, unless its last look at Buffer is six hours old (a post can be moved earlier in Buffer);
+3. asks Buffer for the current `status` and `dueAt` of each of its posts (the `post` query);
+4. decides:
+
+| Buffer says | The announcement |
+| --- | --- |
+| One of the posts is `sent` | Posted to Discord, then `posted` |
+| Every post is gone (Buffer answers `NOT_FOUND`) or has the status `error` | `cancelled`, nothing is posted |
+| Anything else (scheduled, sending, a new `dueAt`) | Stays `pending`, with the new time |
+
+An announcement still pending 45 days after it was registered becomes `expired`. A run makes at most 40 outgoing requests (the free plan allows 50 per run); what does not fit is left for the next run and an `announcements-deferred` line is logged.
+
+### Never twice
+
+Every change of state is a conditional write in R2: it happens only if nobody changed the announcement since it was read. Before the Discord request the announcement is set to `sending`, so a run that overlaps cannot send it too. Then:
+
+| Discord answers | The announcement | Log line |
+| --- | --- | --- |
+| 2xx | `posted`, with the Discord message ID, the time and the Buffer post that went out (the receipt) | `discord-announcement-posted` |
+| 4xx (for example 429, or 404 for a deleted webhook) | Back to `pending`, tried again on the next run; `failed` after 24 attempts | `discord-announcement-failed` |
+| 5xx, a timeout or a broken connection | `unconfirmed`; never sent again on its own, because the message may exist | `discord-announcement-unconfirmed` |
+
+An error while asking Buffer (`announcement-check-failed`) leaves the announcement as it was, and the next run asks again. An announcement that stays `sending` means the write after the Discord request failed; it is not sent again either. For `unconfirmed` or a lingering `sending`, look at the channel: if the message is not there, post it by hand. An image that has expired from R2 is left out and the text is posted (`announcement-image-missing`).
+
+The message goes out with `allowed_mentions: { parse: [] }`, so `@everyone`, roles and users in the text are shown but ping no one. The webhook URL is never written to a log line.
+
+### Set up the webhook
+
+1. In Discord, open the settings of the announcements channel > **Integrations** > **Webhooks** > **New Webhook**. Give it a name and an avatar (they show as the author of every announcement) and select **Copy Webhook URL**. Anyone holding the URL can post to the channel, so treat it as a secret.
+2. Store it as a Worker secret, pasting it only into Wrangler's prompt:
+
+   ```sh
+   yarn wrangler secret put DISCORD_ANNOUNCE_WEBHOOK_URL
+   ```
+
+3. Deploy the Worker, so the Cron Trigger exists. Check it under **Workers & Pages** > the Worker > **Settings** > **Triggers**.
+
+Without the secret, or with a value that is not a `https://discord.com/api/webhooks/<id>/<token>` URL, every run logs `announcements-not-configured` and does nothing; the pending announcements wait. To stop announcements, delete the secret (`yarn wrangler secret delete DISCORD_ANNOUNCE_WEBHOOK_URL`) or delete the webhook in Discord; to move them to another channel, create a webhook there and put its URL in the secret.
+
+### Cost
+
+Cron Triggers are part of the Workers free plan (up to five per account). An hourly run is 24 invocations a day; the time spent waiting on Buffer and Discord is not CPU time. The announcements are small JSON objects in the existing bucket. See [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/) and [limits](https://developers.cloudflare.com/workers/platform/limits/).
+
+Each run that has something due asks Buffer once per post. Buffer's API has request limits per plan ([Rate Limits](https://developers.buffer.com/guides/api-limits.md)); a few posts an hour stay far below them.
+
+### What is not verified
+
+The Buffer `post` query, its `NOT_FOUND` answer for a deleted post and the Discord webhook are covered by tests with stand-ins, from Buffer's and Discord's documentation. None of them has been called with real credentials. See step 7 in [Verify before live use](#verify-before-live-use).
 
 ## Service tokens for automation
 
@@ -165,8 +256,8 @@ node scripts/queuePost.mjs queue job.json
 | Command | What it does |
 | --- | --- |
 | `check` | Asks for the session and prints the Worker's answer: the service and the channels, with the channel IDs a job uses. |
-| `preview` | Reads the job and prints what `queue` would send: the type, the text (a post only), the images in order and the request ID of each channel. Nothing is requested, uploaded or posted. |
-| `queue` | Uploads each image once, in the job's order, and creates a post (or a story) in mode `addToQueue` on each channel of the job. |
+| `preview` | Reads the job and prints what `queue` would send: the type, the text (a post only), the images in order, the request ID of each channel and the announcement with its request ID. Nothing is requested, uploaded or posted. |
+| `queue` | Uploads each image once, in the job's order (those of the announcement too), and creates a post (or a story) in mode `addToQueue` on each channel of the job. Then it registers the announcement, if the job has one, for the posts that exist. |
 
 There is no command for "now" and none for a chosen time. `--credential <name>` may be added to any of them, see [The token](#the-token). The script talks to `https://console.gi.org.pl` only, sends no `Origin` header, follows no redirect and gives up on a request after 60 seconds.
 
@@ -178,6 +269,21 @@ There is no command for "now" and none for a chosen time. `--credential <name>` 
   "text": "The text of the post.",
   "images": ["first.png", "second.png"],
   "channels": ["BUFFER_CHANNEL_ID", "ANOTHER_CHANNEL_ID"]
+}
+```
+
+A post can carry an announcement for Discord (see [Discord announcements](#discord-announcements)):
+
+```json
+{
+  "name": "autumn-news",
+  "text": "The text of the post.",
+  "images": ["first.png"],
+  "channels": ["BUFFER_CHANNEL_ID", "ANOTHER_CHANNEL_ID"],
+  "announce": {
+    "text": "Two or three sentences for Discord, with a link.",
+    "images": ["discord.png"]
+  }
 }
 ```
 
@@ -200,12 +306,15 @@ A story has a `type`, no text and one image:
 | `images` | The PNGs of the post, in order, as paths inside the folder of the job, the same for every channel. At least one. Every path is checked: an absolute path, a network path and anything that leaves the folder (also through a link) is refused before anything is requested. |
 | `image` | One path, the same as `images` with one entry, so earlier jobs keep working. A job has `images` or `image`, not both. |
 | `channels` | The channel IDs the Worker knows (`check` prints them). At least one, none twice. |
+| `announce` | Optional. `text`: 1 to 1000 characters after trimming. `images`: one to four PNGs, landscape or square, as paths inside the folder of the job, like `images`. Nothing else. |
 
-A key the script does not know stops the run before anything is requested. The script checks nothing else: how many images a network takes, that stories are for Instagram channels only (a Facebook channel gets 400 "This channel has no stories."), the size and format of an image and the channels are the Worker's rules. It sends the request anyway and prints the Worker's 400 or 403 in that channel's entry; the other channels still get theirs, and the exit code is 1. Whether a service may queue stories at all is the Worker's policy too (`SERVICE_POST_TYPES`); where it does not, a story gets 403.
+A key the script does not know stops the run before anything is requested. The `announce` block is the one place where the script checks the Worker's rules itself - the length of the text, the number of images and that each is a PNG that is not portrait - because the announcement is registered after the posts are queued, and one the Worker refused then would leave the posts without it. Otherwise the script checks nothing: how many images a network takes, that stories are for Instagram channels only (a Facebook channel gets 400 "This channel has no stories."), the size and format of a post image and the channels are the Worker's rules. It sends the request anyway and prints the Worker's 400 or 403 in that channel's entry; the other channels still get theirs, and the exit code is 1. Whether a service may queue stories at all is the Worker's policy too (`SERVICE_POST_TYPES`); where it does not, a story gets 403.
 
 ### A second run
 
 The script keeps no state. The request ID of a channel is derived from the Client ID, the name of the post and the channel, so every run of the same post sends the same IDs, and the Worker decides what happens: it reserves an ID before it calls Buffer and never creates a second post under it. The images are uploaded again and get new media IDs, so the Worker answers a repeat with 409 and creates nothing; that holds for several images and for stories as well. A story gets a request ID of its own, so it never collides with a post of the same name on the same channel. A changed text under the same name ends the same way: a new post needs a new name. After a run in which one channel was refused, run the same job again: the channels that have their post answer 409, the other one is created.
+
+The announcement has a request ID of its own, derived the same way from the name of the post. `queue` registers it for every channel whose post answered 200 or 409, so a second run after a first one that stopped before the announcement registers it for the posts of the first. Once it is registered, a second run gets 409 for it, as for the posts, and nothing is announced twice. If an upload fails, no post is sent and the announcement is `skipped`.
 
 ### The output
 
@@ -223,7 +332,7 @@ One JSON document on stdout:
 }
 ```
 
-Per channel, `status` is the HTTP status of the Worker and `response` what it said. `step` is `post`, or `upload` when an image was not uploaded and so nothing was posted (then `status` and `response` are the upload's). Status `0` means no answer (the connection broke or the 60 seconds passed); for a post that means the post may exist, so look in Buffer before anything else - running the job again cannot create a second one. `check` has one result with `step: "session"`; `preview` has `name`, `type`, `text` (a post only), `images` and `channels` instead of `results`; a failure of the script itself is `{ "ok": false, "command": ..., "error": "..." }` with the command as far as the arguments were understood (otherwise `null`). The exit code is 0 only when `ok` is true: no error, and every request answered with a 2xx status.
+Per channel, `status` is the HTTP status of the Worker and `response` what it said. `step` is `post`, or `upload` when an image was not uploaded and so nothing was posted (then `status` and `response` are the upload's). Status `0` means no answer (the connection broke or the 60 seconds passed); for a post that means the post may exist, so look in Buffer before anything else - running the job again cannot create a second one. A job with an announcement adds `announcement: { "requestId", "step", "status", "response" }`: `step` is `announce`, or `skipped` (without `status`) when no post exists to announce. `check` has one result with `step: "session"`; `preview` has `name`, `type`, `text` (a post only), `images` and `channels` instead of `results`; a failure of the script itself is `{ "ok": false, "command": ..., "error": "..." }` with the command as far as the arguments were understood (otherwise `null`). The exit code is 0 only when `ok` is true: no error, and every request answered with a 2xx status, the announcement's too.
 
 ### The token
 
@@ -272,7 +381,7 @@ yarn wrangler login
 yarn wrangler r2 bucket create console-buffer-media
 ```
 
-Set the actual bucket name in `r2_buckets[0].bucket_name`. Keep the bucket private; do not enable `r2.dev` or attach a public R2 custom domain. Add R2 lifecycle deletion rules for `images/` and `receipts/` after 90 days. If a post may remain queued longer, increase image retention before relying on it. R2 has a free allowance but overages can be billed; see [R2 pricing](https://developers.cloudflare.com/r2/pricing/).
+Set the actual bucket name in `r2_buckets[0].bucket_name`. Keep the bucket private; do not enable `r2.dev` or attach a public R2 custom domain. Add R2 lifecycle deletion rules for `images/`, `receipts/`, `announcements/` and `announcement-posts/` after 90 days. If a post may remain queued longer, increase image retention before relying on it. R2 has a free allowance but overages can be billed; see [R2 pricing](https://developers.cloudflare.com/r2/pricing/).
 
 Edit `wrangler.jsonc`:
 
@@ -283,6 +392,7 @@ Edit `wrangler.jsonc`:
 | `ACCESS_AUD` | Audience tag of the `/api/buffer/*` Access application |
 | `CHANNELS_JSON` | JSON string with approved channel IDs, names, and service values |
 | `SERVICES_JSON` | JSON string with the allowlisted service tokens (Client ID, name, and optional `channelIds` and `minScheduleLeadMinutes`). `[]` admits none |
+| `triggers.crons` | When the [announcement run](#the-scheduled-run) starts, in UTC. Hourly by default |
 
 Example channel setting:
 
@@ -301,6 +411,8 @@ yarn worker:deploy
 yarn wrangler secret put BUFFER_API_KEY
 ```
 
+For Discord announcements, also `yarn wrangler secret put DISCORD_ANNOUNCE_WEBHOOK_URL` (see [Set up the webhook](#set-up-the-webhook)); without it the Worker posts nothing to Discord and everything else works as before.
+
 Paste the Buffer API key only into Wrangler's interactive secret prompt. Publishing fails closed until the secret and valid channel configuration exist. Repository changes alone do not deploy the Worker or create a secret.
 
 After deployment, set `BUFFER_ENABLED=true` as a GitHub Actions variable in the Console repository and redeploy Console Pages. This maps to the public `VITE_BUFFER_ENABLED` build flag. It is a UI switch, not an authorization control; Access and the Worker enforce authorization. For local Console development, a same-origin proxy to an Access-protected staging Worker is needed; setting `VITE_BUFFER_ENABLED=true` alone cannot provide the API.
@@ -315,4 +427,6 @@ After deployment, set `BUFFER_ENABLED=true` as a GitHub Actions variable in the 
 
 6. If a service token is configured: call `/api/buffer/session` with its two headers and confirm the response names the service. Then confirm that a second service token which is not in `SERVICES_JSON` gets 403, and that the same call without the headers is stopped by Access. With the service token, confirm that a `shareNow` post returns 403 and that a post scheduled 10 minutes ahead returns 400; neither may appear in Buffer.
 
-Worker tests use mocked Buffer/R2 and signed Access JWT fixtures; they do not publish real posts. The service token fixture follows Cloudflare's documented payload; it has not been compared with a token issued by the production Access application, so do step 6 before relying on it. `yarn worker:dev` has no authentication bypass. Use an Access-protected staging hostname and test Buffer channel for integrated testing.
+7. If the Discord webhook is set: queue one post with an `announce` block on a test channel whose next Buffer slot is near, and watch the Worker's logs (`yarn wrangler tail`) around the next run after the post goes out. Confirm exactly one message in the channel, with its images and no ping, and `discord-announcement-posted` in the log. Queue a second one and delete its post in Buffer before it goes out; the next run should log `announcement-cancelled` and post nothing.
+
+Worker tests use mocked Buffer/R2/Discord and signed Access JWT fixtures; they do not publish real posts. The service token fixture follows Cloudflare's documented payload; it has not been compared with a token issued by the production Access application, so do step 6 before relying on it. `yarn worker:dev` has no authentication bypass. Use an Access-protected staging hostname and test Buffer channel for integrated testing.

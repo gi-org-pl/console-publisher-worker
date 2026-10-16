@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { createHash } from "node:crypto";
 import type { R2Bucket, ScheduledController } from "@cloudflare/workers-types";
 import {
   beforeEach,
@@ -281,7 +282,11 @@ beforeEach(() => {
           return null;
         if (failPut?.(key, value)) throw new Error("R2 429: too many writes");
         version += 1;
-        const etag = `etag${version}`;
+        // An image's etag follows its bytes, as R2's does for one put.
+        const etag =
+          value instanceof Uint8Array
+            ? createHash("md5").update(value).digest("hex")
+            : `etag${version}`;
         objects.set(key, {
           value,
           etag,
@@ -554,6 +559,41 @@ describe("Given an announcement to register", () => {
         "One of the posts was queued with another text. A changed post needs a new name.",
     });
     expect(stored(edited.body.requestId)).toBeUndefined();
+  });
+  it("refuses posts queued with other images than the ones given", async () => {
+    // queuePosts uploads png() for its posts.
+    const same = await uploadImage(png());
+    expect((await announce({ postMediaIds: [same] })).response.status).toBe(
+      200,
+    );
+    const other = await uploadImage(png(1000, 500));
+    const edited = await announce({ postMediaIds: [other] });
+    expect(edited.response.status).toBe(409);
+    expect(await edited.response.json()).toEqual({
+      message:
+        "One of the posts was queued with other images. A changed post needs a new name.",
+    });
+    const twice = await announce({ postMediaIds: [same, same] });
+    expect(twice.response.status).toBe(409);
+  });
+  it("refuses to compare with images that are missing or someone else's", async () => {
+    expect(
+      (await announce({ postMediaIds: [crypto.randomUUID()] })).response.status,
+    ).toBe(403);
+    // The images of the posts expired: the comparison cannot be made.
+    const postRequestIds = await queuePosts(["li"]);
+    const queued = JSON.parse(
+      String(objects.get(`receipts/${postRequestIds[0]}`)?.value),
+    );
+    objects.delete(`images/${JSON.parse(queued.fingerprint).mediaId}`);
+    const response = await register({
+      requestId: crypto.randomUUID(),
+      text: "Short",
+      mediaIds: [await uploadImage()],
+      postRequestIds,
+      postMediaIds: [await uploadImage(png())],
+    });
+    expect(response.status).toBe(409);
   });
   it("answers a retry with the same result and refuses changed content under the same ID", async () => {
     const { body, response } = await announce();

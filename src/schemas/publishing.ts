@@ -160,6 +160,12 @@ export const announcementInputSchema = z
      * carry it, so a changed post under an old request ID is not announced.
      */
     postText: z.string().trim().min(1).max(5000).optional(),
+    /**
+     * Images uploaded with the same content as the posts', in order. When
+     * given, every post has to carry the same images (compared by R2 etag),
+     * so a post whose images changed under an old request ID is not announced.
+     */
+    postMediaIds: z.array(z.uuid()).min(1).max(MAX_IMAGES_PER_POST).optional(),
   })
   .strict();
 export type AnnouncementInput = z.infer<typeof announcementInputSchema>;

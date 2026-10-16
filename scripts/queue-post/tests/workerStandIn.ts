@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -162,7 +163,12 @@ export function useWorkerStandIn() {
     vi.stubGlobal("fetch", bufferFetch);
     const objects = new Map<
       string,
-      { value: unknown; customMetadata?: Record<string, string> }
+      {
+        value: unknown;
+        etag: string;
+        uploaded: Date;
+        customMetadata?: Record<string, string>;
+      }
     >();
     env = {
       APP_ORIGIN: origin,
@@ -177,6 +183,8 @@ export function useWorkerStandIn() {
           objects.has(key)
             ? {
                 body: objects.get(key)?.value,
+                etag: objects.get(key)?.etag,
+                uploaded: objects.get(key)?.uploaded,
                 json: async () => JSON.parse(String(objects.get(key)?.value)),
               }
             : null,
@@ -189,7 +197,16 @@ export function useWorkerStandIn() {
           },
         ) => {
           if (options?.onlyIf && objects.has(key)) return null;
-          objects.set(key, { value, customMetadata: options?.customMetadata });
+          // R2 derives the etag of an object written in one put from its bytes.
+          const etag = createHash("md5")
+            .update(value instanceof Uint8Array ? value : String(value))
+            .digest("hex");
+          objects.set(key, {
+            value,
+            etag,
+            uploaded: new Date(),
+            customMetadata: options?.customMetadata,
+          });
           return { key };
         },
       } as unknown as R2Bucket,

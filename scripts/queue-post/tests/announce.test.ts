@@ -249,6 +249,45 @@ describe("queue with an announcement", () => {
       await storedAnnouncement(document.announcement.requestId),
     ).toBeNull();
   });
+  it("is not registered for the old posts when only the image of the job was edited", async () => {
+    const job = await writeAnnounceJob();
+    standIn.answer = (request) =>
+      request.path === "/api/buffer/announcements"
+        ? new Response("unavailable", { status: 503 })
+        : undefined;
+    expect((await script(["queue", job])).exitCode).toBe(1);
+
+    standIn.answer = () => undefined;
+    await writeAnnounceJob();
+    await writeFile(path.join(dir, "post.png"), landscape(1080, 1350));
+    const { document } = await script(["queue", job]);
+    expect(document.announcement).toMatchObject({
+      status: 409,
+      response: {
+        message:
+          "One of the posts was queued with other images. A changed post needs a new name.",
+      },
+    });
+  });
+  it("is not registered for an old story when its image was edited", async () => {
+    await writeFile(path.join(dir, "a.png"), landscape());
+    const job = await writeJob({
+      type: "story",
+      text: undefined,
+      channels: ["ig1"],
+      announce,
+    });
+    standIn.answer = (request) =>
+      request.path === "/api/buffer/announcements"
+        ? new Response("unavailable", { status: 503 })
+        : undefined;
+    expect((await script(["queue", job])).exitCode).toBe(1);
+
+    standIn.answer = () => undefined;
+    await writeFile(path.join(dir, "post.png"), landscape(1080, 1920));
+    const { document } = await script(["queue", job]);
+    expect(document.announcement.status).toBe(409);
+  });
   it("posts nothing when an image of the announcement fails to upload", async () => {
     const job = await writeAnnounceJob();
     standIn.answer = (request) =>

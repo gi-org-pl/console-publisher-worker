@@ -124,14 +124,40 @@ function summary(announcement: Announcement) {
   };
 }
 
-/** The text a post was queued with; its receipt holds the request as it came. */
-function receiptText(postFingerprint: string): string | undefined {
+/** The request a post was queued with, as its receipt holds it. */
+function receiptRequest(postFingerprint: string): {
+  text?: unknown;
+  mediaId?: unknown;
+  mediaIds?: unknown;
+} {
   try {
-    const text = JSON.parse(postFingerprint)?.text;
-    return typeof text === "string" ? text : undefined;
+    return JSON.parse(postFingerprint) ?? {};
   } catch {
+    return {};
+  }
+}
+
+/**
+ * The R2 etags of the caller's images, in order: R2 derives the etag of an
+ * object written in one put from its bytes, so equal etags mean equal images.
+ * Undefined when one is missing or someone else's.
+ */
+async function imageTags(
+  env: Env,
+  operator: Operator,
+  mediaIds: unknown,
+): Promise<string[] | undefined> {
+  if (!Array.isArray(mediaIds) || mediaIds.length === 0) {
     return undefined;
   }
+  const images = await Promise.all(
+    mediaIds.map((mediaId) => env.MEDIA.head(imageKey(String(mediaId)))),
+  );
+  return images.every(
+    (image) => image && image.customMetadata?.owner === operator.subject,
+  )
+    ? images.map((image) => image?.etag ?? "")
+    : undefined;
 }
 
 function fingerprint(input: AnnouncementInput): string {
@@ -302,6 +328,11 @@ export async function registerAnnouncement(
     );
     return error("Only posts this service created can be announced.", 403);
   }
+  const expectedImages =
+    input.postMediaIds && (await imageTags(env, operator, input.postMediaIds));
+  if (input.postMediaIds && !expectedImages) {
+    return error("The image expired or belongs to another operator.", 403);
+  }
   const posts: AnnouncedPost[] = [];
   for (const [index, receipt] of receipts.entries()) {
     if (!receipt?.postId) {
@@ -310,14 +341,25 @@ export async function registerAnnouncement(
         409,
       );
     }
-    if (
-      input.postText !== undefined &&
-      receiptText(receipt.fingerprint) !== input.postText
-    ) {
+    const queued = receiptRequest(receipt.fingerprint);
+    if (input.postText !== undefined && queued.text !== input.postText) {
       return error(
         "One of the posts was queued with another text. A changed post needs a new name.",
         409,
       );
+    }
+    if (expectedImages) {
+      const tags = await imageTags(
+        env,
+        operator,
+        queued.mediaIds ?? (queued.mediaId ? [queued.mediaId] : undefined),
+      );
+      if (tags?.join() !== expectedImages.join()) {
+        return error(
+          "One of the posts was queued with other images. A changed post needs a new name.",
+          409,
+        );
+      }
     }
     posts.push({
       requestId: input.postRequestIds[index],

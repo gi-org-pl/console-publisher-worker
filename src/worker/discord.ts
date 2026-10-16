@@ -45,14 +45,15 @@ export type DiscordResult =
   | { outcome: "unknown"; reason: string };
 
 /**
- * One message with the text and the images as attachments. Mentions are
- * switched off, so a text that contains `@everyone` or a role pings no one.
+ * One message with the text and the images as attachments, read from R2.
+ * Mentions are switched off, so a text that contains `@everyone` or a role
+ * pings no one. A failed read throws; the caller builds the message before it
+ * takes the lock, so nothing is left half sent.
  */
-export async function postToDiscord(
+export async function discordMessage(
   env: Env,
-  webhook: URL,
   announcement: { id: string; text: string; mediaIds: string[] },
-): Promise<DiscordResult> {
+): Promise<FormData> {
   const form = new FormData();
   const attachments: { id: number; filename: string }[] = [];
   for (const mediaId of announcement.mediaIds) {
@@ -82,7 +83,14 @@ export async function postToDiscord(
       attachments,
     }),
   );
+  return form;
+}
 
+/** Sends a message built by `discordMessage` to the webhook. */
+export async function postToDiscord(
+  webhook: URL,
+  form: FormData,
+): Promise<DiscordResult> {
   let response: Response;
   try {
     response = await fetch(webhook, {

@@ -840,6 +840,37 @@ describe("Given the scheduled run", () => {
       expect.objectContaining({ action: "announcement-image-missing" }),
     );
   });
+  it("stays pending, and posts on a later run, when an image cannot be read", async () => {
+    const body = await registered();
+    bufferPosts.set("post1", postStatus("sent"));
+    const get = env.MEDIA.get.bind(env.MEDIA);
+    let broken = true;
+    (env.MEDIA as unknown as { get: unknown }).get = async (key: string) => {
+      const object = await get(key);
+      return key === `images/${body.mediaIds[0]}` && broken && object
+        ? {
+            ...object,
+            arrayBuffer: async () => {
+              throw new Error("R2 read failed");
+            },
+          }
+        : object;
+    };
+    await runCron(at(2 * HOUR));
+    expect(discordForms).toEqual([]);
+    expect(stored(body.requestId)).toMatchObject({
+      status: "pending",
+      attempts: 0,
+    });
+    expect(logged(errorLog)).toContainEqual(
+      expect.objectContaining({ action: "announcement-check-failed" }),
+    );
+
+    broken = false;
+    await runCron(at(3 * HOUR));
+    expect(stored(body.requestId).status).toBe("posted");
+    expect(discordForms).toHaveLength(1);
+  });
   it("waits while the posts are scheduled, keeping the time Buffer gives", async () => {
     const body = await registered();
     const moved = new Date(at(5 * HOUR)).toISOString();

@@ -8,7 +8,7 @@ import {
   writeAnnouncement,
 } from "./announcements";
 import { readBufferPost } from "./buffer";
-import { postToDiscord, webhookUrl } from "./discord";
+import { discordMessage, postToDiscord, webhookUrl } from "./discord";
 import { logError, logEvent } from "./log";
 import type { Env } from "./types";
 
@@ -138,6 +138,9 @@ async function deliver(
   etag: string,
   sentPost: AnnouncedPost,
 ) {
+  // Built first: a failed image read then leaves the announcement pending
+  // for the next run instead of locked.
+  const message = await discordMessage(run.env, announcement);
   // Taken before Discord is called, so a run that overlaps this one cannot
   // send it too: its write would find another etag.
   const locked = await update(run, announcement, etag, {
@@ -150,7 +153,7 @@ async function deliver(
   const lockedAt = Date.now();
 
   run.fetchesLeft -= 1;
-  const result = await postToDiscord(run.env, run.webhook, announcement);
+  const result = await postToDiscord(run.webhook, message);
   const at = new Date(run.now).toISOString();
   const fields = { ...context(announcement), afterPostId: sentPost.postId };
 

@@ -9,6 +9,9 @@
     { "pattern": "console.gi.org.pl/api/buffer/*", "zone_name": "gi.org.pl" },
     { "pattern": "console.gi.org.pl/buffer-media/*", "zone_name": "gi.org.pl" }
   ],
+  // Hourly, at minute 17 (UTC): the run that posts Discord announcements.
+  // Every two hours would be "17 */2 * * *".
+  "triggers": { "crons": ["17 * * * *"] },
   "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "console-buffer-media" }],
   "vars": {
     "APP_ORIGIN": "https://console.gi.org.pl",

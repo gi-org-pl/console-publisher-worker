@@ -9,6 +9,8 @@ export const MAX_SCHEDULE_DAYS = 30;
  * takes the most; the limit of each network is checked by the Worker.
  */
 export const MAX_IMAGES_PER_POST = 20;
+/** The longest text of a post. */
+export const MAX_POST_TEXT = 5000;
 /** What a post can be published as. A story is there for a day and shows no caption. */
 export const POST_TYPES = ["post", "story"] as const;
 /**
@@ -68,7 +70,7 @@ export const publishInputSchema = z
     mediaIds: z.array(z.uuid()).min(1).max(MAX_IMAGES_PER_POST).optional(),
     channelId: z.string().min(1),
     /** Left out for a story, which shows no caption; required for a post. */
-    text: z.string().trim().min(1).max(5000).optional(),
+    text: z.string().trim().min(1).max(MAX_POST_TEXT).optional(),
     /** Left out means "post". */
     type: z.enum(POST_TYPES).optional(),
     mode: z.enum(["addToQueue", "shareNow", "customScheduled"]),
@@ -87,20 +89,88 @@ export const publishInputSchema = z
     (input) => new Set(input.mediaIds).size === (input.mediaIds?.length ?? 0),
     { message: "An image is listed twice.", path: ["mediaIds"] },
   );
-export const publishResultSchema = z.object({ postId: z.string().min(1) });
+/**
+ * `dueAt` is when Buffer means to publish the post: the chosen time, or the
+ * queue slot Buffer gave it. Null when Buffer named none.
+ */
+export const publishResultSchema = z.object({
+  postId: z.string().min(1),
+  dueAt: z.string().nullish(),
+});
+/** What Buffer says about a post. Its statuses are listed in `PostStatus`. */
+const bufferPostSchema = z.object({
+  id: z.string().min(1),
+  status: z.string().nullish(),
+  dueAt: z.string().nullish(),
+  sentAt: z.string().nullish(),
+});
+const bufferErrorsSchema = z
+  .array(
+    z.object({
+      message: z.string(),
+      extensions: z.object({ code: z.string().optional() }).optional(),
+    }),
+  )
+  .optional();
 export const bufferResultSchema = z.object({
   data: z
     .object({
       createPost: z
         .object({
-          post: z.object({ id: z.string().min(1) }).optional(),
+          post: bufferPostSchema.optional(),
           message: z.string().optional(),
         })
         .nullable(),
     })
     .nullish(),
-  errors: z.array(z.object({ message: z.string() })).optional(),
+  errors: bufferErrorsSchema,
 });
+export const bufferPostResultSchema = z.object({
+  data: z.object({ post: bufferPostSchema.nullish() }).nullish(),
+  errors: bufferErrorsSchema,
+});
+export type BufferPost = z.infer<typeof bufferPostSchema>;
+
+/** The longest text of a Discord announcement; it is a short version of the post. */
+export const ANNOUNCEMENT_MAX_TEXT = 1000;
+/** Images of one announcement: one landscape graphic, or a few squares. */
+export const ANNOUNCEMENT_MAX_IMAGES = 4;
+/** Posts one announcement may belong to: one per channel of the same post. */
+export const ANNOUNCEMENT_MAX_POSTS = 10;
+const uniqueIds = (ids: string[]) => new Set(ids).size === ids.length;
+/**
+ * An announcement names its posts by the request IDs they were created with,
+ * so the Worker finds them in its own receipts: it knows who created each one
+ * and which Buffer post it became.
+ */
+export const announcementInputSchema = z
+  .object({
+    requestId: z.uuid(),
+    text: z.string().trim().min(1).max(ANNOUNCEMENT_MAX_TEXT),
+    mediaIds: z
+      .array(z.uuid())
+      .min(1)
+      .max(ANNOUNCEMENT_MAX_IMAGES)
+      .refine(uniqueIds, "An image is listed twice."),
+    postRequestIds: z
+      .array(z.uuid())
+      .min(1)
+      .max(ANNOUNCEMENT_MAX_POSTS)
+      .refine(uniqueIds, "A post is listed twice."),
+    /**
+     * The text the posts were queued with. When given, every post has to
+     * carry it, so a changed post under an old request ID is not announced.
+     */
+    postText: z.string().trim().min(1).max(MAX_POST_TEXT).optional(),
+    /**
+     * Images uploaded with the same content as the posts', in order. When
+     * given, every post has to carry the same images (compared by R2 etag),
+     * so a post whose images changed under an old request ID is not announced.
+     */
+    postMediaIds: z.array(z.uuid()).min(1).max(MAX_IMAGES_PER_POST).optional(),
+  })
+  .strict();
+export type AnnouncementInput = z.infer<typeof announcementInputSchema>;
 export type PublishingSession = z.infer<typeof sessionSchema>;
 export type PublishInput = z.infer<typeof publishInputSchema>;
 

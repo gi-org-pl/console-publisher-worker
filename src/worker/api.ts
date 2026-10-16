@@ -1,3 +1,4 @@
+import { registerAnnouncement } from "./announcements";
 import { loadChannels } from "./config";
 import { error, json } from "./http";
 import { uploadMedia } from "./media";
@@ -62,5 +63,10 @@ export const endpoints: Record<string, Endpoint> = {
         operator,
         allowedChannels(operator, loadChannels(env)),
       ),
+  },
+  "/api/buffer/announcements": {
+    method: "POST",
+    handle: ({ request, env, operator }) =>
+      registerAnnouncement(request, env, operator),
   },
 };

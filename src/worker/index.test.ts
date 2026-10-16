@@ -10,6 +10,7 @@ import {
 } from "vitest";
 import { sessionSchema } from "../schemas/publishing";
 import worker, { type Env } from "./index";
+import { clock } from "./writeGap";
 
 const { authenticate, post } = vi.hoisted(() => ({
   authenticate: vi.fn(),
@@ -37,6 +38,9 @@ let env: Env;
 let errorLog: MockInstance<typeof console.error>;
 let infoLog: MockInstance<typeof console.info>;
 let failReceiptWrite: boolean;
+/** How many receipt writes after the reservation R2 refuses before it takes one. */
+let refusedReceiptWrites: number;
+let sleeps: number[];
 let objects: Map<
   string,
   { value: unknown; customMetadata?: Record<string, string> }
@@ -101,6 +105,11 @@ beforeEach(() => {
   infoLog = vi.spyOn(console, "info").mockImplementation(() => {});
   errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
   failReceiptWrite = false;
+  refusedReceiptWrites = 0;
+  sleeps = [];
+  vi.spyOn(clock, "sleep").mockImplementation(async (ms) => {
+    sleeps.push(ms);
+  });
   authenticate.mockResolvedValue(user);
   post.mockImplementation(async () =>
     Response.json({ data: { createPost: { post: { id: "post1" } } } }),
@@ -139,12 +148,13 @@ beforeEach(() => {
           },
         ) => {
           if (options?.onlyIf && objects.has(key)) return null;
-          if (
-            failReceiptWrite &&
-            !options?.onlyIf &&
-            key.startsWith("receipts/")
-          )
-            throw new Error("R2 unavailable");
+          if (!options?.onlyIf && key.startsWith("receipts/")) {
+            if (failReceiptWrite) throw new Error("R2 unavailable");
+            if (refusedReceiptWrites > 0) {
+              refusedReceiptWrites -= 1;
+              throw new Error("R2 429: one write a second");
+            }
+          }
           objects.set(key, { value, customMetadata: options?.customMetadata });
           return { key };
         },
@@ -266,13 +276,15 @@ describe("Given the publishing Worker", () => {
       expect.stringContaining('"action":"request-failed"'),
     );
   });
-  it("uploads PNGs with an owner and rejects invalid files", async () => {
+  it("uploads PNGs with an owner and their size, and rejects invalid files", async () => {
     const response = await upload();
     const { mediaId: uploaded } = (await response.json()) as {
       mediaId: string;
     };
     expect(objects.get(`images/${uploaded}`)?.customMetadata).toEqual({
       owner: "user1",
+      width: "1080",
+      height: "1080",
     });
     expect((await upload(png(), "image/svg+xml")).status).toBe(415);
     expect((await upload(new Uint8Array(24))).status).toBe(400);
@@ -424,6 +436,24 @@ describe("Given the publishing Worker", () => {
     expect((await send()).status).toBe(409);
     expect(post).toHaveBeenCalledTimes(1);
   });
+  it("writes the receipt a second after its reservation, as R2 needs", async () => {
+    expect((await send()).status).toBe(200);
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]).toBeGreaterThan(1000);
+    expect(sleeps[0]).toBeLessThanOrEqual(1100);
+  });
+  it("tries the receipt once more when R2 refuses it, so a replay still finds the post", async () => {
+    refusedReceiptWrites = 1;
+    expect((await send()).status).toBe(200);
+    expect(sleeps).toEqual([expect.any(Number), 1100]);
+    expect(
+      JSON.parse(String(objects.get(`receipts/${requestId}`)?.value)),
+    ).toMatchObject({ postId: "post1" });
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.stringContaining('"action":"receipt-write-retried"'),
+    );
+    expect(await (await send()).json()).toEqual({ postId: "post1" });
+  });
   it("reports a created post even when its receipt cannot be saved", async () => {
     failReceiptWrite = true;
     const response = await send();
@@ -550,7 +580,7 @@ describe("Given a Cloudflare Access service token", () => {
     const { mediaId: uploaded } = (await response.json()) as {
       mediaId: string;
     };
-    expect(objects.get(`images/${uploaded}`)?.customMetadata).toEqual({
+    expect(objects.get(`images/${uploaded}`)?.customMetadata).toMatchObject({
       owner: serviceOwner,
     });
 

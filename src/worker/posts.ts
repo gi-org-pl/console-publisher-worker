@@ -7,7 +7,12 @@ import {
   postType,
   publishInputSchema,
 } from "../schemas/publishing";
-import { createBufferPost, hasStories, maxImages } from "./buffer";
+import {
+  type CreatedPost,
+  createBufferPost,
+  hasStories,
+  maxImages,
+} from "./buffer";
 import { error, json, readLimited } from "./http";
 import { actorFields, logError, logEvent } from "./log";
 import { imageKey } from "./media";
@@ -22,10 +27,29 @@ const receiptSchema = z.object({
   service: z.string().optional(),
   fingerprint: z.string(),
   postId: z.string().optional(),
+  /** What Buffer answered at creation; receipts from before have neither. */
+  dueAt: z.string().nullish(),
+  status: z.string().nullish(),
 });
+export type Receipt = z.infer<typeof receiptSchema>;
 
-function receiptKey(input: PublishInput): string {
-  return `receipts/${input.requestId}`;
+function receiptKey(requestId: string): string {
+  return `receipts/${requestId}`;
+}
+
+/** The record of a post request, or undefined when there is none. */
+export async function readReceipt(
+  env: Env,
+  requestId: string,
+): Promise<Receipt | undefined> {
+  const object = await env.MEDIA.get(receiptKey(requestId));
+  const stored = object && receiptSchema.safeParse(await object.json());
+  return stored?.success ? stored.data : undefined;
+}
+
+/** What a caller is told about its post, the first time and on a replay. */
+function postResult({ postId, dueAt }: Pick<Receipt, "postId" | "dueAt">) {
+  return { postId, ...(dueAt ? { dueAt } : {}) };
 }
 
 /** Ties a request ID to its exact content, so a changed retry is refused. */
@@ -36,13 +60,13 @@ function fingerprint(input: PublishInput): string {
 function receipt(
   operator: Operator,
   input: PublishInput,
-  postId?: string,
+  created?: CreatedPost,
 ): string {
   return JSON.stringify({
     owner: operator.subject,
     ...(operator.kind === "service" ? { service: operator.name } : {}),
     fingerprint: fingerprint(input),
-    postId,
+    ...created,
   });
 }
 
@@ -114,7 +138,7 @@ async function reserveRequest(
   operator: Operator,
   input: PublishInput,
 ): Promise<Response | undefined> {
-  const key = receiptKey(input);
+  const key = receiptKey(input.requestId);
   const reserved = await env.MEDIA.put(key, receipt(operator, input), {
     onlyIf: { etagDoesNotMatch: "*" },
   });
@@ -122,15 +146,14 @@ async function reserveRequest(
     return undefined;
   }
 
-  const previous = await env.MEDIA.get(key);
-  const stored = previous && receiptSchema.safeParse(await previous.json());
+  const stored = await readReceipt(env, input.requestId);
   if (
-    stored?.success &&
-    stored.data.owner === operator.subject &&
-    stored.data.fingerprint === fingerprint(input) &&
-    stored.data.postId
+    stored &&
+    stored.owner === operator.subject &&
+    stored.fingerprint === fingerprint(input) &&
+    stored.postId
   ) {
-    return json({ postId: stored.data.postId });
+    return json(postResult(stored));
   }
 
   return error(
@@ -213,9 +236,9 @@ export async function createPost(
     channelId: channel.id,
     ...actorFields(operator),
   };
-  let postId: string;
+  let created: CreatedPost;
   try {
-    postId = await createBufferPost(env, input, channel);
+    created = await createBufferPost(env, input, channel);
   } catch (cause) {
     // A timeout can occur after Buffer accepted the mutation. Never auto-retry.
     logError("buffer-post-unconfirmed", cause, context);
@@ -225,14 +248,18 @@ export async function createPost(
     );
   }
 
+  const { postId } = created;
   logEvent("buffer-post-created", { ...context, postId });
 
   try {
-    await env.MEDIA.put(receiptKey(input), receipt(operator, input, postId));
+    await env.MEDIA.put(
+      receiptKey(input.requestId),
+      receipt(operator, input, created),
+    );
   } catch (cause) {
     // The post exists, so report it. An identical retry then gets 409, not a replay.
     logError("receipt-write-failed", cause, { ...context, postId });
   }
 
-  return json({ postId });
+  return json(postResult(created));
 }

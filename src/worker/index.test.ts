@@ -266,13 +266,15 @@ describe("Given the publishing Worker", () => {
       expect.stringContaining('"action":"request-failed"'),
     );
   });
-  it("uploads PNGs with an owner and rejects invalid files", async () => {
+  it("uploads PNGs with an owner and their size, and rejects invalid files", async () => {
     const response = await upload();
     const { mediaId: uploaded } = (await response.json()) as {
       mediaId: string;
     };
     expect(objects.get(`images/${uploaded}`)?.customMetadata).toEqual({
       owner: "user1",
+      width: "1080",
+      height: "1080",
     });
     expect((await upload(png(), "image/svg+xml")).status).toBe(415);
     expect((await upload(new Uint8Array(24))).status).toBe(400);
@@ -550,7 +552,7 @@ describe("Given a Cloudflare Access service token", () => {
     const { mediaId: uploaded } = (await response.json()) as {
       mediaId: string;
     };
-    expect(objects.get(`images/${uploaded}`)?.customMetadata).toEqual({
+    expect(objects.get(`images/${uploaded}`)?.customMetadata).toMatchObject({
       owner: serviceOwner,
     });
 

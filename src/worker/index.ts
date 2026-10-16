@@ -1,3 +1,5 @@
+import type { ScheduledController } from "@cloudflare/workers-types";
+import { runAnnouncements } from "./cron";
 import { error } from "./http";
 import { logError } from "./log";
 import { routeRequest } from "./router";
@@ -18,5 +20,10 @@ export default {
         503,
       );
     }
+  },
+
+  /** The Cron Trigger: posts the Discord announcements whose posts went out. */
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await runAnnouncements(env);
   },
 };

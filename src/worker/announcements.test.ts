@@ -711,6 +711,52 @@ describe("Given an announcement to register", () => {
       ).status,
     ).toBe(200);
   });
+  it("renews an old claim of its own ID before it goes on", async () => {
+    const [post] = await queuePosts(["li"]);
+    const requestId = crypto.randomUUID();
+    objects.set(`announcement-posts/${post}`, {
+      value: JSON.stringify({ announcementId: requestId }),
+      etag: "own",
+    });
+    age(post);
+    const response = await register({
+      requestId,
+      text: "Retry",
+      mediaIds: [await uploadImage()],
+      postRequestIds: [post],
+    });
+    expect(response.status).toBe(200);
+    const claim = objects.get(`announcement-posts/${post}`);
+    expect(claim?.etag).not.toBe("own");
+    expect(Date.now() - (claim?.uploaded?.getTime() ?? 0)).toBeLessThan(5_000);
+  });
+  it("gives up an old claim of its own ID that someone took over meanwhile", async () => {
+    const [post] = await queuePosts(["li"]);
+    const requestId = crypto.randomUUID();
+    objects.set(`announcement-posts/${post}`, {
+      value: JSON.stringify({ announcementId: requestId }),
+      etag: "own",
+    });
+    age(post);
+    const real = env.MEDIA.put.bind(env.MEDIA);
+    const get = env.MEDIA.get.bind(env.MEDIA);
+    (env.MEDIA as unknown as { get: unknown }).get = async (key: string) => {
+      const result = await get(key);
+      if (key === `announcement-posts/${post}` && result) {
+        await real(key, JSON.stringify({ announcementId: "someone" }));
+      }
+      return result;
+    };
+    const response = await register({
+      requestId,
+      text: "Retry",
+      mediaIds: [await uploadImage()],
+      postRequestIds: [post],
+    });
+    expect(response.status).toBe(409);
+    expect(claimHolder(post)).toBe("someone");
+    expect(stored(requestId)).toBeUndefined();
+  });
   it("does not take over a claim someone else took over first", async () => {
     const [post] = await queuePosts(["li"]);
     objects.set(`announcement-posts/${post}`, {

@@ -257,8 +257,18 @@ async function claimPosts(
       return false;
     }
     const claim = await holder.json<{ announcementId?: string }>();
-    // A claim of this ID is from an earlier attempt of the same request.
+    // A claim of this ID is from an earlier attempt of the same request. One
+    // that is getting old is renewed first, so nobody takes it over while
+    // this registration finishes; a renewal that misses means someone did.
     if (claim.announcementId === input.requestId) {
+      if (
+        Date.now() - holder.uploaded.getTime() >= CLAIM_HOLD_MS / 2 &&
+        !(await env.MEDIA.put(key, value, {
+          onlyIf: { etagMatches: holder.etag },
+        }))
+      ) {
+        return false;
+      }
       continue;
     }
     if (

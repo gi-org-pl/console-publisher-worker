@@ -144,7 +144,7 @@ Every change of state is a conditional write in R2: it happens only if nobody ch
 | 4xx (for example 429, or 404 for a deleted webhook) | Back to `pending`, tried again on the next run; `failed` after 24 attempts | `discord-announcement-failed` |
 | 5xx, a timeout or a broken connection | `unconfirmed`; never sent again on its own, because the message may exist | `discord-announcement-unconfirmed` |
 
-An error while asking Buffer (`announcement-check-failed`) leaves the announcement as it was, and the next run asks again. An announcement that stays `sending` means the write after the Discord request failed; it is not sent again either. For `unconfirmed` or a lingering `sending`, look at the channel: if the message is not there, post it by hand. An image that has expired from R2 is left out and the text is posted (`announcement-image-missing`).
+An error while asking Buffer (`announcement-check-failed`) leaves the announcement as it was, and the next run asks again. R2 takes one write a second to the same key, so the write that records Discord's answer waits until a second has passed since the lock, and is tried once more a second later if R2 refuses it (`announcement-write-retried`). An announcement that still stays `sending` means that write failed twice; it is not sent again either. For `unconfirmed` or a lingering `sending`, look at the channel: if the message is not there, post it by hand. An image that has expired from R2 is left out and the text is posted (`announcement-image-missing`).
 
 The message goes out with `allowed_mentions: { parse: [] }`, so `@everyone`, roles and users in the text are shown but ping no one. The webhook URL is never written to a log line.
 

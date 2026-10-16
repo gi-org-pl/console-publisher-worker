@@ -26,12 +26,21 @@ const RECHECK_MS = 6 * 3_600_000;
 const MAX_PENDING_MS = 45 * 86_400_000;
 /** Refused deliveries before an announcement is given up: a day of hourly runs. */
 const MAX_ATTEMPTS = 24;
+/**
+ * R2 takes one write per second to the same key and answers 429 above that,
+ * so the write after the Discord request keeps this distance from the lock.
+ */
+const WRITE_GAP_MS = 1_100;
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 interface Run {
   env: Env;
   webhook: URL;
   now: number;
   fetchesLeft: number;
+  wait: (ms: number) => Promise<void>;
 }
 
 /** The keys of pending announcements, from the status kept in their metadata. */
@@ -99,6 +108,30 @@ async function currentPosts(
   return current;
 }
 
+/**
+ * The write that records what Discord answered. It comes at least a second
+ * after the lock, and is tried once more a second later if R2 refuses it:
+ * without it the announcement would stay `sending` for good.
+ */
+async function finish(
+  run: Run,
+  locked: { announcement: Announcement; etag: string },
+  lockedAt: number,
+  changes: Partial<Announcement> & { status: AnnouncementStatus },
+) {
+  await run.wait(Math.max(0, WRITE_GAP_MS - (Date.now() - lockedAt)));
+  try {
+    return await update(run, locked.announcement, locked.etag, changes);
+  } catch (cause) {
+    logError("announcement-write-retried", cause, {
+      ...context(locked.announcement),
+      status: changes.status,
+    });
+    await run.wait(WRITE_GAP_MS);
+    return update(run, locked.announcement, locked.etag, changes);
+  }
+}
+
 async function deliver(
   run: Run,
   announcement: Announcement,
@@ -114,6 +147,7 @@ async function deliver(
   if (!locked) {
     return;
   }
+  const lockedAt = Date.now();
 
   run.fetchesLeft -= 1;
   const result = await postToDiscord(run.env, run.webhook, announcement);
@@ -121,7 +155,7 @@ async function deliver(
   const fields = { ...context(announcement), afterPostId: sentPost.postId };
 
   if (result.outcome === "posted") {
-    await update(run, locked.announcement, locked.etag, {
+    await finish(run, locked, lockedAt, {
       status: "posted",
       posted: {
         ...(result.messageId ? { messageId: result.messageId } : {}),
@@ -140,7 +174,7 @@ async function deliver(
 
   if (result.outcome === "unknown") {
     // The message may be on Discord; sending again could post it twice.
-    await update(run, locked.announcement, locked.etag, {
+    await finish(run, locked, lockedAt, {
       status: "unconfirmed",
       lastError: result.reason,
       closedAt: at,
@@ -152,7 +186,7 @@ async function deliver(
   }
 
   const givenUp = locked.announcement.attempts >= MAX_ATTEMPTS;
-  await update(run, locked.announcement, locked.etag, {
+  await finish(run, locked, lockedAt, {
     status: givenUp ? "failed" : "pending",
     lastError: result.reason,
     ...(givenUp ? { closedAt: at } : {}),
@@ -234,6 +268,7 @@ async function processAnnouncement(run: Run, key: string): Promise<boolean> {
 export async function runAnnouncements(
   env: Env,
   now = Date.now(),
+  wait: (ms: number) => Promise<void> = sleep,
 ): Promise<void> {
   const webhook = webhookUrl(env.DISCORD_ANNOUNCE_WEBHOOK_URL);
   if (!webhook || !env.BUFFER_API_KEY) {
@@ -248,7 +283,13 @@ export async function runAnnouncements(
     return;
   }
 
-  const run: Run = { env, webhook, now, fetchesLeft: MAX_FETCHES_PER_RUN };
+  const run: Run = {
+    env,
+    webhook,
+    now,
+    fetchesLeft: MAX_FETCHES_PER_RUN,
+    wait,
+  };
   let keys: string[];
   try {
     keys = await pendingKeys(env);

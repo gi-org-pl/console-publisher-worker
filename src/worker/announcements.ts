@@ -190,6 +190,24 @@ async function claimPosts(
   return true;
 }
 
+/**
+ * After losing the race to another request with the same ID, lets go of the
+ * posts that the stored announcement does not name. Both requests hold their
+ * claims under the same ID, so the ones the winner names stay.
+ */
+async function releaseClaims(env: Env, input: AnnouncementInput) {
+  const object = await env.MEDIA.get(announcementKey(input.requestId));
+  const stored = object && announcementSchema.safeParse(await object.json());
+  const held = new Set(
+    stored?.success ? stored.data.posts.map((post) => post.requestId) : [],
+  );
+  await Promise.all(
+    input.postRequestIds
+      .filter((postRequestId) => !held.has(postRequestId))
+      .map((postRequestId) => env.MEDIA.delete(claimKey(postRequestId))),
+  );
+}
+
 export async function registerAnnouncement(
   request: Request,
   env: Env,
@@ -277,10 +295,13 @@ export async function registerAnnouncement(
   };
   if (!(await writeAnnouncement(env, announcement))) {
     // Another request with this ID got there first.
-    return (
+    const answer =
       (await replay(env, operator, input)) ??
-      error("This announcement was already registered.", 409)
-    );
+      error("This announcement was already registered.", 409);
+    if (answer.status !== 200) {
+      await releaseClaims(env, input);
+    }
+    return answer;
   }
 
   logEvent("announcement-registered", {

@@ -51,6 +51,16 @@ let bufferPosts: Map<string, BufferAnswer>;
 let discordAnswer: () => Response | Promise<Response>;
 let discordForms: FormData[];
 let discordUrls: string[];
+/** The pauses the run asked for, in milliseconds. */
+let waits: number[];
+/** Makes one R2 write throw, as R2 does above one write a second to a key. */
+let failPut: ((key: string, value: unknown) => boolean) | undefined;
+
+function runCron(now?: number) {
+  return runAnnouncements(env, now, async (ms) => {
+    waits.push(ms);
+  });
+}
 
 function png(width = 1200, height = 630) {
   const data = new Uint8Array(24);
@@ -185,6 +195,8 @@ beforeEach(() => {
   bufferPosts = new Map();
   discordForms = [];
   discordUrls = [];
+  waits = [];
+  failPut = undefined;
   discordAnswer = () => Response.json({ id: "message1" });
   fetchMock = vi.fn(async (input: unknown, init: RequestInit) => {
     const url = String(input);
@@ -255,6 +267,7 @@ beforeEach(() => {
           current?.etag !== options.onlyIf.etagMatches
         )
           return null;
+        if (failPut?.(key, value)) throw new Error("R2 429: too many writes");
         version += 1;
         const etag = `etag${version}`;
         objects.set(key, {
@@ -549,6 +562,29 @@ describe("Given an announcement to register", () => {
       ).status,
     ).toBe(200);
   });
+  it("lets go of its posts when a parallel request with the same ID and other posts wins", async () => {
+    const first = await queuePosts(["li"]);
+    const second = await queuePosts(["fb"]);
+    const mediaIds = [await uploadImage()];
+    const requestId = crypto.randomUUID();
+    const results = await Promise.all([
+      register({ requestId, text: "One", mediaIds, postRequestIds: first }),
+      register({ requestId, text: "Two", mediaIds, postRequestIds: second }),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual([200, 409]);
+    const loser = stored(requestId).text === "One" ? second : first;
+    expect(objects.has(`announcement-posts/${loser[0]}`)).toBe(false);
+    expect(
+      (
+        await register({
+          requestId: crypto.randomUUID(),
+          text: "Again",
+          mediaIds,
+          postRequestIds: loser,
+        })
+      ).status,
+    ).toBe(200);
+  });
   it("finishes a registration that stopped after taking its posts", async () => {
     const postRequestIds = await queuePosts();
     const requestId = crypto.randomUUID();
@@ -590,7 +626,7 @@ describe("Given the scheduled run", () => {
   it("posts exactly one Discord message once the first post was sent, with its images", async () => {
     const body = await registered();
     bufferPosts.set("post2", postStatus("sent", nextDueAt));
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
 
     expect(discordForms).toHaveLength(1);
     expect(discordUrls[0]).toBe(`${webhook}?wait=true`);
@@ -619,8 +655,46 @@ describe("Given the scheduled run", () => {
     );
 
     // Later runs leave it alone.
-    await runAnnouncements(env, at(3 * HOUR));
-    await runAnnouncements(env, at(4 * HOUR));
+    await runCron(at(3 * HOUR));
+    await runCron(at(4 * HOUR));
+    expect(discordForms).toHaveLength(1);
+  });
+  it("keeps a second between the lock and the write after Discord, as R2 needs", async () => {
+    await registered();
+    bufferPosts.set("post1", postStatus("sent"));
+    await runCron(at(2 * HOUR));
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toBeGreaterThan(1000);
+    expect(waits[0]).toBeLessThanOrEqual(1100);
+  });
+  it("tries the write after Discord once more when R2 refuses it", async () => {
+    const body = await registered();
+    bufferPosts.set("post1", postStatus("sent"));
+    let refused = 0;
+    failPut = (key, value) =>
+      key.startsWith("announcements/") &&
+      String(value).includes('"status":"posted"') &&
+      ++refused === 1;
+    await runCron(at(2 * HOUR));
+    expect(stored(body.requestId).status).toBe("posted");
+    expect(waits).toEqual([expect.any(Number), 1100]);
+    expect(logged(errorLog)).toContainEqual(
+      expect.objectContaining({
+        action: "announcement-write-retried",
+        status: "posted",
+      }),
+    );
+    expect(discordForms).toHaveLength(1);
+  });
+  it("leaves it sending, and never sends again, when R2 refuses that write twice", async () => {
+    const body = await registered();
+    bufferPosts.set("post1", postStatus("sent"));
+    failPut = (key, value) =>
+      key.startsWith("announcements/") &&
+      String(value).includes('"status":"posted"');
+    await runCron(at(2 * HOUR));
+    await runCron(at(3 * HOUR));
+    expect(stored(body.requestId).status).toBe("sending");
     expect(discordForms).toHaveLength(1);
   });
   it("is what the Cron Trigger of the Worker runs", async () => {
@@ -640,7 +714,7 @@ describe("Given the scheduled run", () => {
       text: "Hello @everyone and <@&123>",
     });
     bufferPosts.set("post1", postStatus("sent"));
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
     expect(discordPayload()).toMatchObject({
       content: body.text,
       allowed_mentions: { parse: [] },
@@ -656,7 +730,7 @@ describe("Given the scheduled run", () => {
     const body = await registered();
     objects.delete(`images/${body.mediaIds[0]}`);
     bufferPosts.set("post1", postStatus("sent"));
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
     expect(discordPayload()).toMatchObject({ attachments: [] });
     expect(logged(errorLog)).toContainEqual(
       expect.objectContaining({ action: "announcement-image-missing" }),
@@ -667,7 +741,7 @@ describe("Given the scheduled run", () => {
     const moved = new Date(at(5 * HOUR)).toISOString();
     bufferPosts.set("post1", postStatus("scheduled", moved));
     bufferPosts.set("post2", postStatus("sending", moved));
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
 
     expect(discordForms).toEqual([]);
     expect(stored(body.requestId)).toMatchObject({
@@ -680,32 +754,32 @@ describe("Given the scheduled run", () => {
 
     // Rescheduled to later: the next runs do not ask Buffer before that time.
     const asked = bufferQueries().length;
-    await runAnnouncements(env, at(3 * HOUR));
+    await runCron(at(3 * HOUR));
     expect(bufferQueries()).toHaveLength(asked);
   });
   it("does not ask Buffer before a post is due, except every six hours", async () => {
     nextDueAt = new Date(at(2 * DAY)).toISOString();
     await registered();
-    await runAnnouncements(env, at(HOUR));
+    await runCron(at(HOUR));
     expect(bufferQueries()).toHaveLength(0);
 
-    await runAnnouncements(env, at(7 * HOUR));
+    await runCron(at(7 * HOUR));
     expect(bufferQueries()).toHaveLength(2);
-    await runAnnouncements(env, at(8 * HOUR));
+    await runCron(at(8 * HOUR));
     expect(bufferQueries()).toHaveLength(2);
   });
   it("asks Buffer every run when it named no time for the posts", async () => {
     nextDueAt = null;
     await registered();
-    await runAnnouncements(env);
-    await runAnnouncements(env);
+    await runCron();
+    await runCron();
     expect(bufferQueries()).toHaveLength(4);
   });
   it("cancels the announcement when the posts were deleted in Buffer before they went out", async () => {
     const body = await registered();
     bufferPosts.set("post1", notFound);
     bufferPosts.set("post2", notFound);
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
 
     expect(discordForms).toEqual([]);
     expect(stored(body.requestId)).toMatchObject({
@@ -720,25 +794,25 @@ describe("Given the scheduled run", () => {
       }),
     );
     bufferPosts.set("post1", postStatus("sent"));
-    await runAnnouncements(env, at(3 * HOUR));
+    await runCron(at(3 * HOUR));
     expect(discordForms).toEqual([]);
   });
   it("cancels it when every post failed or was deleted, and waits while one is left", async () => {
     const failed = await registered();
     bufferPosts.set("post1", postStatus("error"));
     bufferPosts.set("post2", notFound);
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
     expect(stored(failed.requestId).status).toBe("cancelled");
 
     const waiting = await registered();
     bufferPosts.set("post3", notFound);
     bufferPosts.set("post4", postStatus("scheduled"));
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
     expect(stored(waiting.requestId).status).toBe("pending");
 
     // The post that is left goes out: the announcement follows it.
     bufferPosts.set("post4", postStatus("sent"));
-    await runAnnouncements(env, at(3 * HOUR));
+    await runCron(at(3 * HOUR));
     expect(stored(waiting.requestId).status).toBe("posted");
     expect(discordForms).toHaveLength(1);
   });
@@ -749,18 +823,18 @@ describe("Given the scheduled run", () => {
     await queuePosts(["fb"]);
     bufferPosts.set("post1", postStatus("sent"));
     bufferPosts.set("post2", postStatus("sent"));
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
     expect(discordForms).toEqual([]);
     expect(bufferQueries()).toEqual([]);
   });
   it("keeps it pending when Buffer cannot be asked, and posts on a later run", async () => {
     const body = await registered();
     bufferPosts.set("post1", () => new Response("down", { status: 502 }));
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
     bufferPosts.set("post1", () =>
       Response.json({ data: null, errors: [{ message: "Unexpected" }] }),
     );
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
     expect(stored(body.requestId).status).toBe("pending");
     expect(
       logged(errorLog).filter(
@@ -769,7 +843,7 @@ describe("Given the scheduled run", () => {
     ).toHaveLength(2);
 
     bufferPosts.set("post1", postStatus("sent"));
-    await runAnnouncements(env, at(3 * HOUR));
+    await runCron(at(3 * HOUR));
     expect(stored(body.requestId).status).toBe("posted");
     expect(discordForms).toHaveLength(1);
   });
@@ -778,7 +852,7 @@ describe("Given the scheduled run", () => {
     bufferPosts.set("post1", postStatus("sent"));
     discordAnswer = () =>
       Response.json({ message: "rate limited" }, { status: 429 });
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
     expect(stored(body.requestId)).toMatchObject({
       status: "pending",
       attempts: 1,
@@ -792,8 +866,8 @@ describe("Given the scheduled run", () => {
     );
 
     discordAnswer = () => new Response(null, { status: 204 });
-    await runAnnouncements(env, at(3 * HOUR));
-    await runAnnouncements(env, at(4 * HOUR));
+    await runCron(at(3 * HOUR));
+    await runCron(at(4 * HOUR));
     expect(discordForms).toHaveLength(2);
     expect(stored(body.requestId)).toMatchObject({
       status: "posted",
@@ -808,7 +882,7 @@ describe("Given the scheduled run", () => {
     bufferPosts.set("post1", postStatus("sent"));
     discordAnswer = () => Response.json({}, { status: 404 });
     for (let run = 0; run < 25; run += 1) {
-      await runAnnouncements(env, at(2 * HOUR + run * HOUR));
+      await runCron(at(2 * HOUR + run * HOUR));
     }
     expect(discordForms).toHaveLength(24);
     expect(stored(body.requestId)).toMatchObject({
@@ -828,8 +902,8 @@ describe("Given the scheduled run", () => {
     const body = await registered();
     bufferPosts.set("post1", postStatus("sent"));
     discordAnswer = answer;
-    await runAnnouncements(env, at(2 * HOUR));
-    await runAnnouncements(env, at(3 * HOUR));
+    await runCron(at(2 * HOUR));
+    await runCron(at(3 * HOUR));
     expect(discordForms).toHaveLength(1);
     expect(stored(body.requestId).status).toBe("unconfirmed");
     expect(logged(errorLog)).toContainEqual(
@@ -839,10 +913,7 @@ describe("Given the scheduled run", () => {
   it("posts once when two runs overlap", async () => {
     await registered();
     bufferPosts.set("post1", postStatus("sent"));
-    await Promise.all([
-      runAnnouncements(env, at(2 * HOUR)),
-      runAnnouncements(env, at(2 * HOUR)),
-    ]);
+    await Promise.all([runCron(at(2 * HOUR)), runCron(at(2 * HOUR))]);
     expect(discordForms).toHaveLength(1);
     expect(logged(infoLog)).toContainEqual(
       expect.objectContaining({ action: "announcement-changed-meanwhile" }),
@@ -851,7 +922,7 @@ describe("Given the scheduled run", () => {
   it("gives up an announcement still waiting after 45 days", async () => {
     nextDueAt = null;
     const body = await registered();
-    await runAnnouncements(env, at(46 * DAY));
+    await runCron(at(46 * DAY));
     expect(stored(body.requestId).status).toBe("expired");
     expect(bufferQueries()).toEqual([]);
   });
@@ -859,7 +930,7 @@ describe("Given the scheduled run", () => {
     nextDueAt = null;
     listPageSize = 5;
     for (let index = 0; index < 22; index += 1) await registered();
-    await runAnnouncements(env);
+    await runCron();
     // Two posts each, and one request kept for Discord: 19 fit in 40 requests.
     expect(bufferQueries()).toHaveLength(38);
     expect(logged(infoLog)).toContainEqual(
@@ -874,7 +945,7 @@ describe("Given the scheduled run", () => {
     });
     const body = await registered();
     bufferPosts.set("post1", postStatus("sent"));
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
     expect(stored(body.requestId).status).toBe("posted");
     expect(logged(errorLog)).toContainEqual(
       expect.objectContaining({
@@ -913,7 +984,7 @@ describe("Given the scheduled run", () => {
     await registered();
     bufferPosts.set("post1", postStatus("sent"));
     Object.assign(env, changes);
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
     expect(bufferQueries()).toEqual([]);
     expect(discordForms).toEqual([]);
     const line = logged(infoLog).find(
@@ -927,7 +998,7 @@ describe("Given the scheduled run", () => {
   });
   it("does nothing without the Buffer key", async () => {
     env.BUFFER_API_KEY = "";
-    await runAnnouncements(env);
+    await runCron();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(logged(infoLog)).toContainEqual({
       action: "announcements-not-configured",
@@ -939,7 +1010,7 @@ describe("Given the scheduled run", () => {
     (env.MEDIA as unknown as { list: () => never }).list = () => {
       throw new Error("R2 unavailable");
     };
-    await runAnnouncements(env);
+    await runCron();
     expect(logged(errorLog)).toContainEqual(
       expect.objectContaining({ action: "announcements-list-failed" }),
     );
@@ -948,7 +1019,7 @@ describe("Given the scheduled run", () => {
     await registered();
     bufferPosts.set("post1", postStatus("sent"));
     discordAnswer = () => Response.json({}, { status: 500 });
-    await runAnnouncements(env, at(2 * HOUR));
+    await runCron(at(2 * HOUR));
     const lines = [...infoLog.mock.calls, ...errorLog.mock.calls].map(
       ([line]) => String(line),
     );

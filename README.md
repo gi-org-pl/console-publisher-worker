@@ -85,7 +85,7 @@ Do **not** protect `/buffer-media/*` with that Access application: Buffer must f
 
 ## The time Buffer gives a post
 
-`POST /api/buffer/posts` answers `{ "postId": "...", "dueAt": "..." }`. `dueAt` is the time Buffer means to publish the post: the chosen time of a scheduled post, or the slot Buffer gave a queued one. It is left out when Buffer names none. The Worker reads it, with the post's `status`, from Buffer's [`Post`](https://developers.buffer.com/types/Post.md) type when it creates the post, and keeps both in the receipt. A replay of the same request returns the same answer.
+`POST /api/buffer/posts` answers `{ "postId": "...", "dueAt": "..." }`. `dueAt` is the time Buffer means to publish the post: the chosen time of a scheduled post, or the slot Buffer gave a queued one. It is left out when Buffer names none. The Worker reads it, with the post's `status`, from Buffer's [`Post`](https://developers.buffer.com/types/Post.md) type when it creates the post, and keeps both in the receipt. A replay of the same request returns the same answer. The receipt is written twice, once to reserve the request ID and once with what Buffer answered; R2 takes one write a second to the same key, so the second write waits until a second has passed since the first and is tried once more if R2 refuses it. A post can therefore take up to a second longer to be answered than Buffer takes.
 
 ## Discord announcements
 

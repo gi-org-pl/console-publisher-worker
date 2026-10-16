@@ -11,6 +11,7 @@ import {
 } from "vitest";
 import { runAnnouncements } from "./cron";
 import worker, { type Env } from "./index";
+import { clock } from "./writeGap";
 
 // Discord announcements end to end: a service queues posts and registers an
 // announcement through the Worker's own routes, then the scheduled run asks
@@ -59,9 +60,7 @@ let waits: number[];
 let failPut: ((key: string, value: unknown) => boolean) | undefined;
 
 function runCron(now?: number) {
-  return runAnnouncements(env, now, async (ms) => {
-    waits.push(ms);
-  });
+  return runAnnouncements(env, now);
 }
 
 function png(width = 1200, height = 630) {
@@ -208,6 +207,9 @@ beforeEach(() => {
   discordForms = [];
   discordUrls = [];
   waits = [];
+  vi.spyOn(clock, "sleep").mockImplementation(async (ms) => {
+    waits.push(ms);
+  });
   failPut = undefined;
   discordAnswer = () => Response.json({ id: "message1" });
   fetchMock = vi.fn(async (input: unknown, init: RequestInit) => {
@@ -881,6 +883,8 @@ describe("Given the scheduled run", () => {
   it("keeps a second between the lock and the write after Discord, as R2 needs", async () => {
     await registered();
     bufferPosts.set("post1", postStatus("sent"));
+    // Only the pauses of the run, not those of queueing the posts.
+    waits.length = 0;
     await runCron(at(2 * HOUR));
     expect(waits).toHaveLength(1);
     expect(waits[0]).toBeGreaterThan(1000);
@@ -889,6 +893,8 @@ describe("Given the scheduled run", () => {
   it("tries the write after Discord once more when R2 refuses it", async () => {
     const body = await registered();
     bufferPosts.set("post1", postStatus("sent"));
+    // Only the pauses of the run, not those of queueing the posts.
+    waits.length = 0;
     let refused = 0;
     failPut = (key, value) =>
       key.startsWith("announcements/") &&

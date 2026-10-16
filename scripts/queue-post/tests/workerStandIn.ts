@@ -5,6 +5,7 @@ import path from "node:path";
 import type { R2Bucket } from "@cloudflare/workers-types";
 import { afterEach, beforeEach, expect, vi } from "vitest";
 import worker, { type Env } from "../../../src/worker/index";
+import { clock } from "../../../src/worker/writeGap";
 import { run } from "../../queuePost.mjs";
 
 // What the tests of the whole script share. The script runs here against the
@@ -150,6 +151,8 @@ export function useWorkerStandIn() {
   beforeEach(async () => {
     vi.spyOn(console, "info").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
+    // The Worker's pause between two writes to one R2 key takes no time here.
+    vi.spyOn(clock, "sleep").mockResolvedValue(undefined);
     dir = await mkdtemp(path.join(os.tmpdir(), "queue-post-"));
     seen = [];
     outputs = [];

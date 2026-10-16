@@ -11,6 +11,7 @@ import { readBufferPost } from "./buffer";
 import { discordMessage, postToDiscord, webhookUrl } from "./discord";
 import { logError, logEvent } from "./log";
 import type { Env } from "./types";
+import { writeAgain } from "./writeGap";
 
 // The scheduled run behind Discord announcements. A Cron Trigger starts it
 // (`triggers.crons` in wrangler.jsonc); each run looks at the pending
@@ -26,21 +27,11 @@ const RECHECK_MS = 6 * 3_600_000;
 const MAX_PENDING_MS = 45 * 86_400_000;
 /** Refused deliveries before an announcement is given up: a day of hourly runs. */
 const MAX_ATTEMPTS = 24;
-/**
- * R2 takes one write per second to the same key and answers 429 above that,
- * so the write after the Discord request keeps this distance from the lock.
- */
-const WRITE_GAP_MS = 1_100;
-
-const sleep = (ms: number) =>
-  new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 interface Run {
   env: Env;
   webhook: URL;
   now: number;
   fetchesLeft: number;
-  wait: (ms: number) => Promise<void>;
 }
 
 /**
@@ -129,17 +120,15 @@ async function finish(
   lockedAt: number,
   changes: Partial<Announcement> & { status: AnnouncementStatus },
 ) {
-  await run.wait(Math.max(0, WRITE_GAP_MS - (Date.now() - lockedAt)));
-  try {
-    return await update(run, locked.announcement, locked.etag, changes);
-  } catch (cause) {
-    logError("announcement-write-retried", cause, {
-      ...context(locked.announcement),
-      status: changes.status,
-    });
-    await run.wait(WRITE_GAP_MS);
-    return update(run, locked.announcement, locked.etag, changes);
-  }
+  return writeAgain(
+    lockedAt,
+    () => update(run, locked.announcement, locked.etag, changes),
+    (cause) =>
+      logError("announcement-write-retried", cause, {
+        ...context(locked.announcement),
+        status: changes.status,
+      }),
+  );
 }
 
 async function deliver(
@@ -301,7 +290,6 @@ async function checkAnnouncement(
 export async function runAnnouncements(
   env: Env,
   now = Date.now(),
-  wait: (ms: number) => Promise<void> = sleep,
 ): Promise<void> {
   const webhook = webhookUrl(env.DISCORD_ANNOUNCE_WEBHOOK_URL);
   if (!webhook || !env.BUFFER_API_KEY) {
@@ -321,7 +309,6 @@ export async function runAnnouncements(
     webhook,
     now,
     fetchesLeft: MAX_FETCHES_PER_RUN,
-    wait,
   };
   let keys: string[];
   try {

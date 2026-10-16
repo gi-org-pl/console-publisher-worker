@@ -18,6 +18,7 @@ import { actorFields, logError, logEvent } from "./log";
 import { imageKey } from "./media";
 import { minScheduleLeadMs, modeAllowed, postTypeAllowed } from "./policy";
 import type { Channel, Env, Operator } from "./types";
+import { writeAgain } from "./writeGap";
 
 const MAX_BODY_BYTES = 24_000;
 const DAY_MS = 86_400_000;
@@ -230,6 +231,7 @@ export async function createPost(
   if (replay) {
     return replay;
   }
+  const reservedAt = Date.now();
 
   const context = {
     requestId: input.requestId,
@@ -252,9 +254,17 @@ export async function createPost(
   logEvent("buffer-post-created", { ...context, postId });
 
   try {
-    await env.MEDIA.put(
-      receiptKey(input.requestId),
-      receipt(operator, input, created),
+    // The second write to the receipt: R2 takes one a second per key, and
+    // without it the post has no post ID on record for a replay or an
+    // announcement.
+    await writeAgain(
+      reservedAt,
+      () =>
+        env.MEDIA.put(
+          receiptKey(input.requestId),
+          receipt(operator, input, created),
+        ),
+      (cause) => logError("receipt-write-retried", cause, context),
     );
   } catch (cause) {
     // The post exists, so report it. An identical retry then gets 409, not a replay.

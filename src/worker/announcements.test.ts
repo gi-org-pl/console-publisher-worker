@@ -585,6 +585,27 @@ describe("Given an announcement to register", () => {
       ).status,
     ).toBe(200);
   });
+  it("lets go of a post an interrupted attempt took when a retry meets a taken post", async () => {
+    const { body } = await announce();
+    const fresh = (await queuePosts(["li"]))[0];
+    const requestId = crypto.randomUUID();
+    // An earlier attempt under this ID took the fresh post and stopped.
+    objects.set(`announcement-posts/${fresh}`, {
+      value: JSON.stringify({ announcementId: requestId }),
+      etag: "claim",
+    });
+    const retry = await register({
+      ...body,
+      requestId,
+      postRequestIds: [fresh, body.postRequestIds[0]],
+    });
+    expect(retry.status).toBe(409);
+    expect(objects.has(`announcement-posts/${fresh}`)).toBe(false);
+    // The post held by the first announcement keeps its claim.
+    expect(objects.has(`announcement-posts/${body.postRequestIds[0]}`)).toBe(
+      true,
+    );
+  });
   it("finishes a registration that stopped after taking its posts", async () => {
     const postRequestIds = await queuePosts();
     const requestId = crypto.randomUUID();

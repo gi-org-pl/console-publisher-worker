@@ -162,50 +162,55 @@ async function replay(
 }
 
 /**
+ * Lets go of the claims this announcement ID holds on the given posts, except
+ * for the posts a stored announcement under this ID names. Called when a
+ * registration ends without storing its announcement.
+ */
+async function releaseClaims(
+  env: Env,
+  input: AnnouncementInput,
+  postRequestIds: string[],
+) {
+  const object = await env.MEDIA.get(announcementKey(input.requestId));
+  const stored = object && announcementSchema.safeParse(await object.json());
+  const named = new Set(
+    stored?.success ? stored.data.posts.map((post) => post.requestId) : [],
+  );
+  await Promise.all(
+    postRequestIds
+      .filter((postRequestId) => !named.has(postRequestId))
+      .map((postRequestId) => env.MEDIA.delete(claimKey(postRequestId))),
+  );
+}
+
+/**
  * Takes each post for this announcement. A post another announcement holds
- * refuses the whole request, and the posts taken so far are let go again.
+ * refuses the whole request, and the posts this ID holds so far - taken now
+ * or by an earlier attempt that stopped - are let go again.
  */
 async function claimPosts(
   env: Env,
   input: AnnouncementInput,
 ): Promise<boolean> {
-  const taken: string[] = [];
+  const held: string[] = [];
   for (const postRequestId of input.postRequestIds) {
     const key = claimKey(postRequestId);
     const value = JSON.stringify({ announcementId: input.requestId });
     if (
-      await env.MEDIA.put(key, value, { onlyIf: { etagDoesNotMatch: "*" } })
+      !(await env.MEDIA.put(key, value, { onlyIf: { etagDoesNotMatch: "*" } }))
     ) {
-      taken.push(key);
-      continue;
+      // Held already: by this ID after an interrupted attempt, or by another announcement.
+      const holder = await env.MEDIA.get(key);
+      const claim =
+        holder && (await holder.json<{ announcementId?: string }>());
+      if (claim?.announcementId !== input.requestId) {
+        await releaseClaims(env, input, held);
+        return false;
+      }
     }
-    // Held already: by this announcement after an interrupted attempt, or by another one.
-    const holder = await env.MEDIA.get(key);
-    const claim = holder && (await holder.json<{ announcementId?: string }>());
-    if (claim?.announcementId !== input.requestId) {
-      await Promise.all(taken.map((done) => env.MEDIA.delete(done)));
-      return false;
-    }
+    held.push(postRequestId);
   }
   return true;
-}
-
-/**
- * After losing the race to another request with the same ID, lets go of the
- * posts that the stored announcement does not name. Both requests hold their
- * claims under the same ID, so the ones the winner names stay.
- */
-async function releaseClaims(env: Env, input: AnnouncementInput) {
-  const object = await env.MEDIA.get(announcementKey(input.requestId));
-  const stored = object && announcementSchema.safeParse(await object.json());
-  const held = new Set(
-    stored?.success ? stored.data.posts.map((post) => post.requestId) : [],
-  );
-  await Promise.all(
-    input.postRequestIds
-      .filter((postRequestId) => !held.has(postRequestId))
-      .map((postRequestId) => env.MEDIA.delete(claimKey(postRequestId))),
-  );
 }
 
 export async function registerAnnouncement(
@@ -299,7 +304,8 @@ export async function registerAnnouncement(
       (await replay(env, operator, input)) ??
       error("This announcement was already registered.", 409);
     if (answer.status !== 200) {
-      await releaseClaims(env, input);
+      // Every post of this request was claimed under this ID to get here.
+      await releaseClaims(env, input, input.postRequestIds);
     }
     return answer;
   }

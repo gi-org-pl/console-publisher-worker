@@ -9,6 +9,8 @@ export const MAX_SCHEDULE_DAYS = 30;
  * takes the most; the limit of each network is checked by the Worker.
  */
 export const MAX_IMAGES_PER_POST = 20;
+/** The longest text of a post. */
+export const MAX_POST_TEXT = 5000;
 /** What a post can be published as. A story is there for a day and shows no caption. */
 export const POST_TYPES = ["post", "story"] as const;
 /**
@@ -68,7 +70,7 @@ export const publishInputSchema = z
     mediaIds: z.array(z.uuid()).min(1).max(MAX_IMAGES_PER_POST).optional(),
     channelId: z.string().min(1),
     /** Left out for a story, which shows no caption; required for a post. */
-    text: z.string().trim().min(1).max(5000).optional(),
+    text: z.string().trim().min(1).max(MAX_POST_TEXT).optional(),
     /** Left out means "post". */
     type: z.enum(POST_TYPES).optional(),
     mode: z.enum(["addToQueue", "shareNow", "customScheduled"]),
@@ -159,7 +161,7 @@ export const announcementInputSchema = z
      * The text the posts were queued with. When given, every post has to
      * carry it, so a changed post under an old request ID is not announced.
      */
-    postText: z.string().trim().min(1).max(5000).optional(),
+    postText: z.string().trim().min(1).max(MAX_POST_TEXT).optional(),
     /**
      * Images uploaded with the same content as the posts', in order. When
      * given, every post has to carry the same images (compared by R2 etag),

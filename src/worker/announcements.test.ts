@@ -465,6 +465,22 @@ describe("Given an announcement to register", () => {
     expect(response.status).toBe(400);
     expect(stored(body.requestId)).toBeUndefined();
   });
+  it("reads the longest body the schema allows, in any script, and no more", async () => {
+    // Letters of two bytes in UTF-8, and quotes that JSON escapes: about 12 kB.
+    const longest = await announce({
+      text: 'ż"'.repeat(500),
+      postText: "ż".repeat(5000),
+    });
+    // Read and validated: refused only because the posts carry another text.
+    expect(longest.response.status).toBe(409);
+
+    const tooLong = await call(
+      "/api/buffer/announcements",
+      { text: "x".repeat(70_000) },
+      headersOf("application/json"),
+    );
+    expect(tooLong.status).toBe(400);
+  });
   it("refuses an image listed twice and a post listed twice", async () => {
     const postRequestIds = await queuePosts(["li"]);
     const mediaId = await uploadImage();

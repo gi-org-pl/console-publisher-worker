@@ -1,7 +1,12 @@
 import { z } from "zod";
 import {
+  ANNOUNCEMENT_MAX_IMAGES,
+  ANNOUNCEMENT_MAX_POSTS,
+  ANNOUNCEMENT_MAX_TEXT,
   type AnnouncementInput,
   announcementInputSchema,
+  MAX_IMAGES_PER_POST,
+  MAX_POST_TEXT,
 } from "../schemas/publishing";
 import { error, json, readLimited } from "./http";
 import { actorFields, logError, logEvent } from "./log";
@@ -14,7 +19,16 @@ import type { Env, Operator } from "./types";
 // one of the posts. Only a service may register one: Console, which runs on
 // an operator's browser session, has no way to publish to Discord.
 
-const MAX_BODY_BYTES = 8_000;
+/**
+ * The largest body the schema allows, with room: each character of the two
+ * texts can take up to 6 bytes in JSON (a `\u0000` escape), and up to 34
+ * IDs of about 40 bytes each come with them.
+ */
+const MAX_BODY_BYTES =
+  (ANNOUNCEMENT_MAX_TEXT + MAX_POST_TEXT) * 6 +
+  (ANNOUNCEMENT_MAX_IMAGES + ANNOUNCEMENT_MAX_POSTS + MAX_IMAGES_PER_POST) *
+    40 +
+  1_000;
 
 /**
  * Where an announcement stands. `pending` waits for Buffer; `sending` holds

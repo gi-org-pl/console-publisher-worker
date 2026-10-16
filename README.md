@@ -132,7 +132,7 @@ That is minute 17 of every hour, in UTC. Every two hours would be `"17 */2 * * *
 | Every post is gone (Buffer answers `NOT_FOUND`) or has the status `error` | `cancelled`, nothing is posted |
 | Anything else (scheduled, sending, a new `dueAt`) | Stays `pending`, with the new time |
 
-An announcement still pending 45 days after it was registered becomes `expired`. A run makes at most 40 outgoing requests (the free plan allows 50 per run); what does not fit is left for the next run and an `announcements-deferred` line is logged.
+An announcement still pending 45 days after it was registered becomes `expired`. A run makes at most 40 outgoing requests (the free plan allows 50 per run); what does not fit is left for the next run and an `announcements-deferred` line is logged. Each run takes the least recently checked announcements first (the time of the last look is kept in the object's metadata), so what one run left is the first thing the next one does.
 
 ### Never twice
 

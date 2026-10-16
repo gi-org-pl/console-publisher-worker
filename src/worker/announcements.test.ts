@@ -1072,6 +1072,25 @@ describe("Given the scheduled run", () => {
       expect.objectContaining({ action: "announcements-deferred", left: 3 }),
     );
   });
+  it("starts the next run with what the last one had to leave", async () => {
+    nextDueAt = null;
+    listPageSize = 5;
+    const ids: string[] = [];
+    for (let index = 0; index < 22; index += 1)
+      ids.push((await registered()).requestId);
+    await runCron(at(HOUR));
+    const unchecked = ids.filter((id) => !stored(id).checkedAt);
+    expect(unchecked).toHaveLength(3);
+
+    const second = at(2 * HOUR);
+    await runCron(second);
+    for (const id of unchecked) {
+      expect(stored(id).checkedAt).toBe(new Date(second).toISOString());
+    }
+    expect(
+      objects.get(`announcements/${unchecked[0]}.json`)?.customMetadata,
+    ).toMatchObject({ status: "pending", checkedAt: expect.any(String) });
+  });
   it("goes on with the others when one announcement is unreadable", async () => {
     objects.set("announcements/broken.json", {
       value: "not JSON",

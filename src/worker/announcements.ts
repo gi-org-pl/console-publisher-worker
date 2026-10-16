@@ -78,8 +78,9 @@ function claimKey(postRequestId: string): string {
 }
 
 /**
- * Writes an announcement. The status also goes into the object's metadata, so
- * the scheduled run can find the pending ones from a listing alone. With
+ * Writes an announcement. The status and the time of the last look at Buffer
+ * also go into the object's metadata, so the scheduled run can find and order
+ * the pending ones from a listing alone. With
  * `etag`, the write happens only if nobody changed the object since it was
  * read; without, only if it does not exist yet. Null means it did not happen.
  */
@@ -94,7 +95,13 @@ export function writeAnnouncement(
     {
       onlyIf: etag ? { etagMatches: etag } : { etagDoesNotMatch: "*" },
       httpMetadata: { contentType: "application/json" },
-      customMetadata: { status: announcement.status },
+      customMetadata: {
+        status: announcement.status,
+        // Lets a run look first at what was looked at least recently.
+        ...(announcement.checkedAt
+          ? { checkedAt: announcement.checkedAt }
+          : {}),
+      },
     },
   );
 }

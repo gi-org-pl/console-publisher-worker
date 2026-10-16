@@ -43,9 +43,13 @@ interface Run {
   wait: (ms: number) => Promise<void>;
 }
 
-/** The keys of pending announcements, from the status kept in their metadata. */
+/**
+ * The keys of pending announcements, from the status kept in their metadata,
+ * the least recently checked first: what a run had to leave for the next one
+ * comes first there, so a few announcements cannot take every run's requests.
+ */
 async function pendingKeys(env: Env): Promise<string[]> {
-  const keys: string[] = [];
+  const pending: { key: string; checkedAt: string }[] = [];
   let cursor: string | undefined;
   do {
     const page = await env.MEDIA.list({
@@ -55,12 +59,18 @@ async function pendingKeys(env: Env): Promise<string[]> {
     });
     for (const object of page.objects) {
       if (object.customMetadata?.status === "pending") {
-        keys.push(object.key);
+        pending.push({
+          key: object.key,
+          checkedAt: object.customMetadata.checkedAt ?? "",
+        });
       }
     }
     cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
-  return keys;
+  // ISO times sort as text; never checked ("") comes first.
+  return pending
+    .sort((a, b) => a.checkedAt.localeCompare(b.checkedAt))
+    .map((entry) => entry.key);
 }
 
 function context(announcement: Announcement) {

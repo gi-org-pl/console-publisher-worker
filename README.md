@@ -1,3 +1,5 @@
+![console-publisher-worker header](https://raw.githubusercontent.com/gi-org-pl/console-publisher-worker/main/.github/image/header.png)
+
 # Console Publisher Worker
 
 This repository contains an API-only Cloudflare Worker for Buffer publishing. The graphic editor and publishing controls live in the separate [console-app](https://github.com/gi-org-pl/console-app) repository. There is no HTML page or publishing form in this Worker.

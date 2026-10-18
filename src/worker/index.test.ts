@@ -128,26 +128,53 @@ beforeEach(() => {
     ]),
     SERVICES_JSON: JSON.stringify([{ clientId, name: "gieniek-bot" }]),
     MEDIA: {
-      head: vi.fn(async (key: string) => objects.get(key) ?? null),
-      get: vi.fn(async (key: string) => {
+      head: vi.fn(async (key: string) => {
         const object = objects.get(key);
         return object
-          ? {
-              body: object.value,
-              json: async () => JSON.parse(String(object.value)),
-            }
+          ? { ...object, size: (object.value as Uint8Array).length }
           : null;
+      }),
+      get: vi.fn(
+        async (
+          key: string,
+          options?: { range?: { offset: number; length: number } },
+        ) => {
+          const object = objects.get(key);
+          if (!object) return null;
+          const { value } = object;
+          const part =
+            value instanceof Uint8Array && options?.range
+              ? value.slice(
+                  options.range.offset,
+                  options.range.offset + options.range.length,
+                )
+              : value;
+          return {
+            body: part,
+            size: value instanceof Uint8Array ? value.length : undefined,
+            json: async () => JSON.parse(String(value)),
+            arrayBuffer: async () => new Uint8Array(part as Uint8Array).buffer,
+          };
+        },
+      ),
+      delete: vi.fn(async (key: string) => {
+        objects.delete(key);
       }),
       put: vi.fn(
         async (
           key: string,
-          value: unknown,
+          given: unknown,
           options?: {
             onlyIf?: unknown;
             customMetadata?: Record<string, string>;
           },
         ) => {
           if (options?.onlyIf && objects.has(key)) return null;
+          // A video arrives as the request's stream, as in the Worker.
+          const value =
+            given instanceof ReadableStream
+              ? new Uint8Array(await new Response(given).arrayBuffer())
+              : given;
           if (!options?.onlyIf && key.startsWith("receipts/")) {
             if (failReceiptWrite) throw new Error("R2 unavailable");
             if (refusedReceiptWrites > 0) {
@@ -1000,7 +1027,7 @@ describe("Given a story", () => {
     ["a story with an empty caption", { ...story, text: "" }],
     ["a post without a text", withoutText],
     ["a post without a text, named as one", { ...withoutText, type: "post" }],
-    ["a type that is not known", { ...input, type: "reel" }],
+    ["a type that is not known", { ...input, type: "carousel" }],
   ])("refuses %s with 400 before anything else", async (_name, body) => {
     expect((await send(body)).status).toBe(400);
     expect(post).not.toHaveBeenCalled();
@@ -1083,6 +1110,514 @@ describe("Given a story", () => {
       configure({ channelIds: ["elsewhere"] });
       expect((await sendAsService(story)).status).toBe(403);
       expect(post).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("Given a video", () => {
+  const videoId = "44444444-4444-4444-8444-444444444444";
+  const { mediaId: _image, ...withoutImage } = input;
+  const reel = { ...withoutImage, videoId, type: "reel" };
+  const sent = (call = 0) =>
+    JSON.parse(post.mock.calls[call][1].body).variables.input;
+  const videoAsset = {
+    video: { url: `${origin}/buffer-media/${videoId}.mp4` },
+  };
+  const onChannel = (service: string) => {
+    env.CHANNELS_JSON = JSON.stringify([
+      { id: "allowed", name: "Channel", service },
+    ]);
+  };
+  function mp4(size = 64) {
+    const bytes = new Uint8Array(size);
+    new DataView(bytes.buffer).setUint32(0, 24);
+    bytes.set(new TextEncoder().encode("ftypisom"), 4);
+    for (let index = 24; index < size; index += 1) bytes[index] = index % 251;
+    return bytes;
+  }
+  function uploadVideo(
+    body: Uint8Array = mp4(),
+    headers: Record<string, string> = {},
+  ) {
+    return worker.fetch(
+      new Request(`${origin}/api/buffer/media`, {
+        method: "POST",
+        body: body as BodyInit,
+        headers: {
+          Origin: origin,
+          "Content-Type": "video/mp4",
+          "Content-Length": String(body.length),
+          ...headers,
+        },
+      }),
+      env,
+    );
+  }
+  function fetchVideo(headers: Record<string, string> = {}, method = "GET") {
+    return worker.fetch(
+      new Request(`${origin}/buffer-media/${videoId}.mp4`, {
+        method,
+        headers,
+      }),
+      env,
+    );
+  }
+  const own = (owner = "user1", bytes = mp4()) =>
+    objects.set(`images/${videoId}.mp4`, {
+      value: bytes,
+      customMetadata: { owner },
+    });
+  beforeEach(() => own());
+
+  describe("upload", () => {
+    it("stores an MP4 under a .mp4 key with its type and owner", async () => {
+      const response = await uploadVideo();
+      expect(response.status).toBe(200);
+      const { mediaId: uploaded } = (await response.json()) as {
+        mediaId: string;
+      };
+      expect(objects.get(`images/${uploaded}.mp4`)).toEqual({
+        value: mp4(),
+        customMetadata: { owner: "user1" },
+      });
+      expect(objects.has(`images/${uploaded}`)).toBe(false);
+      expect(env.MEDIA.put).toHaveBeenCalledWith(
+        `images/${uploaded}.mp4`,
+        expect.any(ReadableStream),
+        expect.objectContaining({ httpMetadata: { contentType: "video/mp4" } }),
+      );
+    });
+
+    it("takes a video from a service, owned by the service", async () => {
+      asService();
+      const response = await worker.fetch(
+        new Request(`${origin}/api/buffer/media`, {
+          method: "POST",
+          body: mp4() as BodyInit,
+          headers: { "Content-Type": "video/mp4", "Content-Length": "64" },
+        }),
+        env,
+      );
+      const { mediaId: uploaded } = (await response.json()) as {
+        mediaId: string;
+      };
+      expect(objects.get(`images/${uploaded}.mp4`)?.customMetadata).toEqual({
+        owner: serviceOwner,
+      });
+    });
+
+    it("refuses a video over 100 MB with 413 before storing anything", async () => {
+      const response = await uploadVideo(mp4(), {
+        "Content-Length": String(100 * 1024 * 1024 + 1),
+      });
+      expect(response.status).toBe(413);
+      expect(await response.json()).toEqual({
+        message: "The video must be at most 100 MB.",
+      });
+      expect(env.MEDIA.put).not.toHaveBeenCalled();
+    });
+
+    it("lets a declared length of exactly 100 MB through", async () => {
+      const response = await uploadVideo(mp4(), {
+        "Content-Length": String(100 * 1024 * 1024),
+      });
+      // The stand-in stores the 64 bytes it got; the length was not refused.
+      expect(response.status).toBe(200);
+    });
+
+    it.each([
+      ["no length", undefined],
+      ["a length that is no number", "64 bytes"],
+    ])("needs the length of the video to stream it into R2: %s", async (_name, length) => {
+      const headers: Record<string, string> = {
+        Origin: origin,
+        "Content-Type": "video/mp4",
+      };
+      if (length) headers["Content-Length"] = length;
+      const response = await worker.fetch(
+        new Request(`${origin}/api/buffer/media`, {
+          method: "POST",
+          body: mp4() as BodyInit,
+          headers,
+        }),
+        env,
+      );
+      expect(response.status).toBe(411);
+      expect(env.MEDIA.put).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a PNG", png()],
+      ["too few bytes", mp4(12)],
+      [
+        "an ftyp box longer than the file",
+        (() => {
+          const bytes = mp4(32);
+          new DataView(bytes.buffer).setUint32(0, 33);
+          return bytes;
+        })(),
+      ],
+      [
+        "an ftyp box shorter than its header",
+        (() => {
+          const bytes = mp4();
+          new DataView(bytes.buffer).setUint32(0, 8);
+          return bytes;
+        })(),
+      ],
+      [
+        "another box first",
+        (() => {
+          const bytes = mp4();
+          bytes.set(new TextEncoder().encode("moov"), 4);
+          return bytes;
+        })(),
+      ],
+    ])("refuses %s with 400 and keeps nothing", async (_name, bytes) => {
+      objects.clear();
+      const response = await uploadVideo(bytes);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ message: "Invalid MP4 file." });
+      expect([...objects.keys()]).toEqual([]);
+    });
+
+    it("refuses an upload without a body with 400", async () => {
+      const response = await worker.fetch(
+        new Request(`${origin}/api/buffer/media`, {
+          method: "POST",
+          headers: {
+            Origin: origin,
+            "Content-Type": "video/mp4",
+            "Content-Length": "64",
+          },
+        }),
+        env,
+      );
+      expect(response.status).toBe(400);
+      expect(env.MEDIA.put).not.toHaveBeenCalled();
+    });
+
+    it("refuses a file R2 no longer has when its start is checked", async () => {
+      vi.mocked(env.MEDIA.get).mockResolvedValueOnce(null);
+      const response = await uploadVideo();
+      expect(response.status).toBe(400);
+      expect(env.MEDIA.delete).toHaveBeenCalled();
+    });
+
+    it("names both formats when the type is neither", async () => {
+      const response = await upload(mp4(), "video/quicktime");
+      expect(response.status).toBe(415);
+      expect(await response.json()).toEqual({
+        message: "Choose a PNG image or an MP4 video.",
+      });
+    });
+  });
+
+  describe("public route", () => {
+    beforeEach(() => {
+      authenticate.mockRejectedValue(new Error("no login"));
+    });
+
+    it("serves the whole video without authentication, with its type and length", async () => {
+      const response = await fetchVideo();
+      expect(response.status).toBe(200);
+      expect(Object.fromEntries(response.headers)).toMatchObject({
+        "content-type": "video/mp4",
+        "content-length": "64",
+        "accept-ranges": "bytes",
+        "cache-control": "public, max-age=3600",
+        "x-content-type-options": "nosniff",
+      });
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(mp4());
+      expect(authenticate).not.toHaveBeenCalled();
+    });
+
+    it("answers HEAD with the length and no body", async () => {
+      const response = await fetchVideo({}, "HEAD");
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Length")).toBe("64");
+      expect(response.headers.get("Accept-Ranges")).toBe("bytes");
+      expect(response.body).toBeNull();
+      expect(env.MEDIA.get).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["bytes=0-15", 0, 15],
+      ["bytes=0-1023", 0, 63],
+      ["bytes=60-", 60, 63],
+      ["bytes=-4", 60, 63],
+      ["bytes=-100", 0, 63],
+      ["bytes=5-5", 5, 5],
+    ])("serves the range %s with 206", async (range, first, last) => {
+      const response = await fetchVideo({ Range: range });
+      expect(response.status).toBe(206);
+      expect(response.headers.get("Content-Range")).toBe(
+        `bytes ${first}-${last}/64`,
+      );
+      expect(response.headers.get("Content-Length")).toBe(
+        String(last - first + 1),
+      );
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(
+        mp4().slice(first, last + 1),
+      );
+      expect(JSON.parse(infoLog.mock.calls[0][0])).toEqual({
+        action: "video-served",
+        mediaId: videoId,
+        method: "GET",
+        range,
+        status: 206,
+      });
+    });
+
+    it.each([
+      "bytes=64-",
+      "bytes=100-200",
+      "bytes=10-5",
+      "bytes=-0",
+    ])("answers %s outside the file with 416", async (range) => {
+      const response = await fetchVideo({ Range: range });
+      expect(response.status).toBe(416);
+      expect(response.headers.get("Content-Range")).toBe("bytes */64");
+    });
+
+    it.each([
+      "bytes=0-1,4-5",
+      "items=0-1",
+      "bytes=-",
+    ])("serves the whole video for a range it does not take: %s", async (range) => {
+      const response = await fetchVideo({ Range: range });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Length")).toBe("64");
+    });
+
+    it("finds a video at .mp4 only, and nothing that is not there", async () => {
+      const status = async (path: string) =>
+        (await worker.fetch(new Request(`${origin}${path}`), env)).status;
+      expect(await status(`/buffer-media/${videoId}.png`)).toBe(404);
+      expect(await status(`/buffer-media/${mediaId}.mp4`)).toBe(404);
+      expect(await status(`/buffer-media/${videoId}.mov`)).toBe(404);
+      expect((await fetchVideo({}, "POST")).status).toBe(405);
+    });
+
+    it("answers 404 when the video goes between the two reads", async () => {
+      vi.mocked(env.MEDIA.get).mockResolvedValueOnce(null);
+      expect((await fetchVideo()).status).toBe(404);
+    });
+  });
+
+  describe("posts", () => {
+    it("sends an Instagram reel with one video, shared to the feed", async () => {
+      expect(await (await send(reel)).json()).toEqual({ postId: "post1" });
+      expect(sent()).toMatchObject({
+        text: "Hello",
+        mode: "addToQueue",
+        assets: [videoAsset],
+        metadata: { instagram: { type: "reel", shouldShareToFeed: true } },
+      });
+    });
+
+    it("keeps an Instagram reel out of the feed when the post says so", async () => {
+      expect((await send({ ...reel, shareToFeed: false })).status).toBe(200);
+      expect(sent().metadata).toEqual({
+        instagram: { type: "reel", shouldShareToFeed: false },
+      });
+      expect(
+        (
+          await send({
+            ...reel,
+            requestId: crypto.randomUUID(),
+            shareToFeed: true,
+          })
+        ).status,
+      ).toBe(200);
+      expect(sent(1).metadata.instagram.shouldShareToFeed).toBe(true);
+    });
+
+    it("sends the thumbnail offset to Instagram", async () => {
+      expect((await send({ ...reel, thumbnailOffset: 2000 })).status).toBe(200);
+      expect(sent().assets).toEqual([
+        {
+          video: {
+            url: `${origin}/buffer-media/${videoId}.mp4`,
+            metadata: { thumbnailOffset: 2000 },
+          },
+        },
+      ]);
+    });
+
+    it("sends a Facebook reel without the options Buffer takes for Instagram only", async () => {
+      onChannel("facebook");
+      expect(
+        (await send({ ...reel, shareToFeed: false, thumbnailOffset: 2000 }))
+          .status,
+      ).toBe(200);
+      expect(sent().assets).toEqual([videoAsset]);
+      expect(sent().metadata).toEqual({ facebook: { type: "reel" } });
+    });
+
+    it("sends a LinkedIn video as a plain post", async () => {
+      onChannel("linkedin");
+      const { type: _reel, ...videoPost } = reel;
+      expect((await send({ ...videoPost, thumbnailOffset: 2000 })).status).toBe(
+        200,
+      );
+      expect(sent().assets).toEqual([videoAsset]);
+      expect(sent()).not.toHaveProperty("metadata");
+    });
+
+    it.each([
+      ["linkedin", reel, "This channel has no reels."],
+      ["threads", reel, "This channel has no reels."],
+      [
+        "instagram",
+        { ...reel, type: "post" },
+        "On this channel a video goes out as a reel.",
+      ],
+      [
+        "facebook",
+        { ...reel, type: undefined },
+        "On this channel a video goes out as a reel.",
+      ],
+      ["threads", { ...reel, type: "post" }, "This channel takes no video."],
+      ["bluesky", { ...reel, type: "post" }, "This channel takes no video."],
+      [
+        "facebook",
+        { ...input, type: "story", text: undefined },
+        "This channel has no stories.",
+      ],
+    ])("refuses on %s with 400 and says why: %j", async (service, body, message) => {
+      onChannel(service);
+      const response = await send(body);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ message });
+      expect(post).not.toHaveBeenCalled();
+      expect(objects.has(`receipts/${requestId}`)).toBe(false);
+    });
+
+    it.each([
+      [
+        "a reel with an image",
+        { ...input, type: "reel" },
+        "A reel takes one video and no images.",
+      ],
+      [
+        "a video story",
+        { ...withoutImage, videoId, type: "story", text: undefined },
+        "A story takes an image, not a video.",
+      ],
+      [
+        "a video and an image",
+        { ...reel, mediaId },
+        'Give one of "mediaId", "mediaIds" or "videoId".',
+      ],
+      [
+        "a video and a list of images",
+        { ...reel, mediaIds: [mediaId] },
+        'Give one of "mediaId", "mediaIds" or "videoId".',
+      ],
+      [
+        "shareToFeed on a post",
+        { ...input, shareToFeed: true },
+        '"shareToFeed" is for a reel only.',
+      ],
+      [
+        "a thumbnail offset for images",
+        { ...input, thumbnailOffset: 0 },
+        '"thumbnailOffset" is for a video only.',
+      ],
+      [
+        "a reel without a caption",
+        { ...reel, text: undefined },
+        "A post and a reel need a text; a story is sent without one.",
+      ],
+    ])("refuses %s with 400 and says why", async (_name, body, message) => {
+      const response = await send(body);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ message });
+      expect(post).not.toHaveBeenCalled();
+      expect(env.MEDIA.put).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["more than one video", { ...reel, videoIds: [videoId, mediaId] }],
+      ["a negative thumbnail offset", { ...reel, thumbnailOffset: -1 }],
+      [
+        "a thumbnail offset past 15 minutes",
+        { ...reel, thumbnailOffset: 900_001 },
+      ],
+      ["a fractional thumbnail offset", { ...reel, thumbnailOffset: 1.5 }],
+      ["a video ID that is no UUID", { ...reel, videoId: "x" }],
+    ])("refuses %s with 400", async (_name, body) => {
+      const response = await send(body);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        message: "Check the post text and settings.",
+      });
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["is missing", () => objects.delete(`images/${videoId}.mp4`)],
+      ["belongs to someone else", () => own("user2")],
+      [
+        "is an image of the same ID",
+        () => {
+          objects.delete(`images/${videoId}.mp4`);
+          objects.set(`images/${videoId}`, {
+            value: png(),
+            customMetadata: { owner: "user1" },
+          });
+        },
+      ],
+    ])("refuses a video that %s with 403, and Buffer is not called", async (_name, spoil) => {
+      spoil();
+      const response = await send(reel);
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({
+        message: "The video expired or belongs to another operator.",
+      });
+      expect(post).not.toHaveBeenCalled();
+      expect(objects.has(`receipts/${requestId}`)).toBe(false);
+    });
+
+    it("returns the same reel for a retry and 409 when an option changes", async () => {
+      expect((await send(reel)).status).toBe(200);
+      expect(await (await send(reel)).json()).toEqual({ postId: "post1" });
+      expect((await send({ ...reel, shareToFeed: false })).status).toBe(409);
+      expect((await send({ ...reel, thumbnailOffset: 10 })).status).toBe(409);
+      expect(post).toHaveBeenCalledTimes(1);
+    });
+
+    describe("from a service", () => {
+      beforeEach(() => {
+        asService();
+        own(serviceOwner);
+      });
+
+      it("is accepted, queued like a post", async () => {
+        expect((await sendAsService(reel)).status).toBe(200);
+        expect(sent()).toMatchObject({
+          mode: "addToQueue",
+          metadata: { instagram: { type: "reel" } },
+        });
+      });
+
+      it("keeps the restrictions of a service: no immediate publishing, its own channels", async () => {
+        expect(
+          (await sendAsService({ ...reel, mode: "shareNow" })).status,
+        ).toBe(403);
+        env.SERVICES_JSON = JSON.stringify([
+          { clientId, name: "gieniek-bot", channelIds: ["elsewhere"] },
+        ]);
+        expect((await sendAsService(reel)).status).toBe(403);
+        expect(post).not.toHaveBeenCalled();
+      });
+
+      it("cannot post an operator's video", async () => {
+        own("user1");
+        expect((await sendAsService(reel)).status).toBe(403);
+        expect(post).not.toHaveBeenCalled();
+      });
     });
   });
 });

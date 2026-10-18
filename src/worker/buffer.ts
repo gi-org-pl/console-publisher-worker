@@ -7,7 +7,7 @@ import {
   postMediaIds,
   postType,
 } from "../schemas/publishing";
-import { mediaUrl } from "./media";
+import { mediaUrl, videoUrl } from "./media";
 import type { Channel, Env } from "./types";
 
 const BUFFER_API = "https://api.buffer.com";
@@ -37,18 +37,72 @@ export function hasStories(channel: Channel): boolean {
   return STORY_SERVICES.includes(channel.service);
 }
 
+/** The networks a reel can be sent to; Buffer takes the type in their metadata. */
+const REEL_SERVICES: readonly Channel["service"][] = ["instagram", "facebook"];
+
+export function hasReels(channel: Channel): boolean {
+  return REEL_SERVICES.includes(channel.service);
+}
+
+/**
+ * The types a video can go out as, per network. On Instagram and Facebook a
+ * video is a reel: Instagram shows every video as one, and a video in a
+ * Facebook feed post was not asked for and not tried. LinkedIn has no post
+ * types, so a video there is a post. A network that is not listed takes no
+ * video until its rules are looked up.
+ */
+const VIDEO_TYPES: Partial<Record<Channel["service"], readonly PostType[]>> = {
+  instagram: ["reel"],
+  facebook: ["reel"],
+  linkedin: ["post"],
+};
+
+export function videoTypes(channel: Channel): readonly PostType[] {
+  return VIDEO_TYPES[channel.service] ?? [];
+}
+
 /** Networks where Buffer rejects a post that has no channel-specific type. */
-function channelMetadata(channel: Channel, type: PostType): object | undefined {
+function channelMetadata(
+  channel: Channel,
+  input: PublishInput,
+): object | undefined {
+  const type = postType(input);
   switch (channel.service) {
     case "instagram":
-      // A story is not a feed post, so it is not shared to the feed.
-      return { instagram: { type, shouldShareToFeed: type === "post" } };
+      // A story is not a feed post, so it is not shared to the feed; a reel
+      // is, unless the post says otherwise.
+      return {
+        instagram: {
+          type,
+          shouldShareToFeed:
+            type === "post" || (type === "reel" && input.shareToFeed !== false),
+        },
+      };
     case "facebook":
-      // Always a feed post: a story for Facebook is refused before this.
-      return { facebook: { type: "post" } };
+      // A feed post or a reel: a story for Facebook is refused before this.
+      return { facebook: { type: type === "reel" ? "reel" : "post" } };
     default:
       return undefined;
   }
+}
+
+/**
+ * The media of a post as Buffer takes it: one asset per image, in the order
+ * given (Buffer shows them in that order), or the one video. Buffer takes a
+ * thumbnail offset on Instagram only (and TikTok and Pinterest, which the
+ * Worker does not serve), so it is left out elsewhere.
+ */
+function postAssets(env: Env, input: PublishInput, channel: Channel) {
+  if (input.videoId) {
+    const offset =
+      input.thumbnailOffset !== undefined && channel.service === "instagram"
+        ? { metadata: { thumbnailOffset: input.thumbnailOffset } }
+        : {};
+    return [{ video: { url: videoUrl(env, input.videoId), ...offset } }];
+  }
+  return postMediaIds(input).map((mediaId) => ({
+    image: { url: mediaUrl(env, mediaId) },
+  }));
 }
 
 /**
@@ -94,11 +148,8 @@ export async function createBufferPost(
   input: PublishInput,
   channel: Channel,
 ): Promise<CreatedPost> {
-  // One entry per image, in the order given: Buffer shows them in that order.
-  const assets = postMediaIds(input).map((mediaId) => ({
-    image: { url: mediaUrl(env, mediaId) },
-  }));
-  const metadata = channelMetadata(channel, postType(input));
+  const assets = postAssets(env, input, channel);
+  const metadata = channelMetadata(channel, input);
   const response = await bufferRequest(env, mutation, {
     input: {
       channelId: channel.id,

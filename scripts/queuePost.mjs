@@ -25,15 +25,21 @@ const UTF8 = new TextDecoder("utf-8", { fatal: true });
 // Worker refuses would leave the posts without it.
 const ANNOUNCEMENT_MAX_TEXT = 1000;
 const ANNOUNCEMENT_MAX_IMAGES = 4;
+// A video can take longer to upload than the 60 seconds of every other request.
+const VIDEO_TIMEOUT_MS = 300_000;
 
 const jobSchema = z
   .strictObject({
     name: z.string().regex(/^[a-z0-9][a-z0-9-]{2,63}$/),
-    type: z.enum(["post", "story"]).default("post"),
+    type: z.enum(["post", "story", "reel"]).default("post"),
     text: z.string().optional(),
     // `image` is the one-image form of `images`, so earlier jobs stay valid.
     image: z.string().optional(),
     images: z.array(z.string()).min(1).optional(),
+    // One MP4 in place of the images, with the options of a video post.
+    video: z.string().optional(),
+    shareToFeed: z.boolean().optional(),
+    thumbnailOffset: z.number().int().min(0).optional(),
     channels: z
       .array(z.string().min(1))
       .min(1)
@@ -49,9 +55,20 @@ const jobSchema = z
       })
       .optional(),
   })
-  .refine((job) => (job.image === undefined) !== (job.images === undefined))
-  // A post needs a text and a story has none; the Worker's other rules are its own.
-  .refine((job) => (job.type === "story") === (job.text === undefined));
+  .refine(
+    (job) =>
+      [job.image, job.images, job.video].filter((media) => media !== undefined)
+        .length === 1,
+  )
+  // A post and a reel need a text and a story has none; the Worker's other
+  // rules are its own.
+  .refine((job) => (job.type === "story") === (job.text === undefined))
+  // The options of a video would otherwise be dropped without a word.
+  .refine(
+    (job) =>
+      job.video !== undefined ||
+      (job.shareToFeed === undefined && job.thumbnailOffset === undefined),
+  );
 
 /** @param {string[]} argv */
 function parseArguments(argv) {
@@ -70,9 +87,9 @@ function parseArguments(argv) {
   return { command, file, credential };
 }
 
-/** The image is read from inside the job's folder and nowhere else. */
-async function readImage(folder, file) {
-  const refuse = (why) => new Error(`The image "${file}" ${why}.`);
+/** A file of the job is read from inside the job's folder and nowhere else. */
+async function readImage(folder, file, what = "image") {
+  const refuse = (why) => new Error(`The ${what} "${file}" ${why}.`);
   if (path.isAbsolute(file))
     throw refuse("has to be a path inside the folder of the job");
   const real = await realpath(path.resolve(folder, file)).catch(() => {
@@ -130,18 +147,44 @@ async function readJob(file, cwd) {
   }
   if (!parsed.success)
     throw new Error(
-      `The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to ${ANNOUNCEMENT_MAX_TEXT} characters and 1 to ${ANNOUNCEMENT_MAX_IMAGES} images), and nothing else, are expected (see: ${parsed.error.issues.map((issue) => issue.path.join(".") || "job").join(", ")}).`,
+      `The job is not valid: a name, channels, image or images or a video, a text (a post and a reel), shareToFeed and thumbnailOffset (a video only) and an optional announce (a text of 1 to ${ANNOUNCEMENT_MAX_TEXT} characters and 1 to ${ANNOUNCEMENT_MAX_IMAGES} images), and nothing else, are expected (see: ${parsed.error.issues.map((issue) => issue.path.join(".") || "job").join(", ")}).`,
     );
   const folder = path.dirname(await realpath(jobPath));
   const { image, ...job } = parsed.data;
+  if (job.video !== undefined)
+    return {
+      ...job,
+      images: [],
+      bytes: [],
+      videoBytes: await readImage(folder, job.video, "video"),
+      announce: await readAnnouncement(folder, job.announce),
+    };
   const images = job.images ?? [image];
   const bytes = [];
   for (const file of images) bytes.push(await readImage(folder, file));
-  const announce = job.announce && {
-    ...job.announce,
-    bytes: await readAnnouncementImages(folder, job.announce.images),
+  return {
+    ...job,
+    images,
+    bytes,
+    announce: await readAnnouncement(folder, job.announce),
   };
-  return { ...job, images, bytes, announce };
+}
+
+async function readAnnouncement(folder, announce) {
+  return (
+    announce && {
+      ...announce,
+      bytes: await readAnnouncementImages(folder, announce.images),
+    }
+  );
+}
+
+/** The options of a video post that the job sets, as the Worker takes them. */
+function videoOptions({ shareToFeed, thumbnailOffset }) {
+  return {
+    ...(shareToFeed !== undefined && { shareToFeed }),
+    ...(thumbnailOffset !== undefined && { thumbnailOffset }),
+  };
 }
 
 /** A request ID in the shape of a UUID, the same for every run with the same seed. */
@@ -153,9 +196,10 @@ function uuidFrom(seed) {
 
 /** The request ID of a channel: the same for every run of the same post. */
 function requestId(clientId, { name, type }, channelId) {
-  // The type is hashed for a story only, so the IDs of posts stay what they were.
+  // The type is hashed for a story and a reel only, so the IDs of posts stay
+  // what they were.
   return uuidFrom(
-    `${clientId}\n${name}\n${channelId}${type === "story" ? "\nstory" : ""}`,
+    `${clientId}\n${name}\n${channelId}${type === "post" ? "" : `\n${type}`}`,
   );
 }
 
@@ -164,14 +208,22 @@ function announcementRequestId(clientId, { name }) {
   return uuidFrom(`${clientId}\n${name}\n\nannouncement`);
 }
 
-/** Uploads images one by one; stops at the first that fails and returns its answer. */
-async function uploadAll(context, images) {
+/**
+ * Uploads files one by one (images, or the one video); stops at the first
+ * that fails and returns its answer.
+ */
+async function uploadAll(context, files, type = "image/png") {
   const mediaIds = [];
-  for (const body of images) {
+  for (const body of files) {
     const upload = await ask(context, "/api/buffer/media", {
       method: "POST",
-      type: "image/png",
+      type,
       body,
+      // The Worker streams a video into storage, which needs its length first.
+      ...(type === "video/mp4" && {
+        length: body.length,
+        timeoutMs: VIDEO_TIMEOUT_MS,
+      }),
     });
     if (upload.status !== 200 || upload.response?.mediaId === undefined)
       return { mediaIds, failed: upload };
@@ -195,7 +247,7 @@ const parseJson = (text) => {
 async function ask(
   { deps, token },
   route,
-  { method = "GET", type, body } = {},
+  { method = "GET", type, body, length, timeoutMs = deps.timeoutMs } = {},
 ) {
   try {
     const response = await deps.fetch(new URL(route, deps.baseUrl), {
@@ -204,10 +256,11 @@ async function ask(
         "CF-Access-Client-Id": token.clientId,
         "CF-Access-Client-Secret": token.clientSecret,
         ...(type && { "Content-Type": type }),
+        ...(length !== undefined && { "Content-Length": String(length) }),
       },
       body,
       redirect: "manual",
-      signal: AbortSignal.timeout(deps.timeoutMs),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await response.text();
     return { status: response.status, response: parseJson(text) };
@@ -239,11 +292,12 @@ async function execute(argv, deps, secrets, document) {
     job.text ?? "",
     ...job.channels,
     ...job.images,
+    ...(job.video === undefined ? [] : [job.video]),
     ...(job.announce ? [job.announce.text, ...job.announce.images] : []),
   ];
   if (sent.some((value) => secrets.some((secret) => value.includes(secret))))
     throw new Error(
-      "The text, a channel or an image path of the job contains the service token. Nothing was sent.",
+      "The text, a channel or a file path of the job contains the service token. Nothing was sent.",
     );
   const channels = job.channels.map((channelId) => ({
     channelId,
@@ -259,14 +313,19 @@ async function execute(argv, deps, secrets, document) {
       name: job.name,
       type: job.type,
       ...(job.text !== undefined && { text: job.text }),
-      images: job.images,
+      ...(job.video === undefined
+        ? { images: job.images }
+        : { video: job.video, ...videoOptions(job) }),
       channels,
       ...(announce && { announce }),
     };
 
   // Each image once, in order, those of the announcement too; the first
   // failure stops the run before any post.
-  const posted = await uploadAll(context, job.bytes);
+  const posted =
+    job.video === undefined
+      ? await uploadAll(context, job.bytes)
+      : await uploadAll(context, [job.videoBytes], "video/mp4");
   const announced =
     job.announce && !posted.failed
       ? await uploadAll(context, job.announce.bytes)
@@ -285,10 +344,12 @@ async function execute(argv, deps, secrets, document) {
               type: "application/json",
               body: JSON.stringify({
                 requestId: channel.requestId,
-                mediaIds: posted.mediaIds,
+                ...(job.video === undefined
+                  ? { mediaIds: posted.mediaIds }
+                  : { videoId: posted.mediaIds[0], ...videoOptions(job) }),
                 channelId: channel.channelId,
                 text: job.text,
-                ...(job.type === "story" && { type: "story" }),
+                ...(job.type !== "post" && { type: job.type }),
                 mode: "addToQueue",
               }),
             })),
@@ -303,7 +364,9 @@ async function execute(argv, deps, secrets, document) {
       announce,
       announced.mediaIds,
       results,
-      { postText: job.text, postMediaIds: posted.mediaIds },
+      job.video === undefined
+        ? { postText: job.text, postMediaIds: posted.mediaIds }
+        : { postText: job.text, postVideoId: posted.mediaIds[0] },
     ),
   };
 }
@@ -318,7 +381,7 @@ async function registerAnnouncement(
   announce,
   mediaIds,
   results,
-  { postText, postMediaIds },
+  postContent,
 ) {
   const { requestId } = announce;
   const postRequestIds = results
@@ -344,10 +407,9 @@ async function registerAnnouncement(
         mediaIds,
         postRequestIds,
         // A 409 is also what a post edited under the same name gets; with the
-        // text and the images of this run the Worker tells the two apart and
-        // refuses the edited one.
-        postText,
-        postMediaIds,
+        // text and the images (or the video) of this run the Worker tells the
+        // two apart and refuses the edited one.
+        ...postContent,
       }),
     })),
   };

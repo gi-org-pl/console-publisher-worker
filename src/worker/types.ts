@@ -10,6 +10,8 @@ export interface Env {
   APP_ORIGIN: string;
   CHANNELS_JSON: string;
   SERVICES_JSON?: string;
+  /** A Discord channel webhook for announcements. Unset means none are posted. */
+  DISCORD_ANNOUNCE_WEBHOOK_URL?: string;
 }
 
 /** What a verified Access token proves, before the service allowlist is applied. */

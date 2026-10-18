@@ -20,6 +20,12 @@ const USAGE =
 // Malformed bytes are an error, not a silent U+FFFD in a published text.
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
+// The Worker's limits for an announcement. They are checked here as well
+// because an announcement is registered after the posts are queued: one the
+// Worker refuses would leave the posts without it.
+const ANNOUNCEMENT_MAX_TEXT = 1000;
+const ANNOUNCEMENT_MAX_IMAGES = 4;
+
 const jobSchema = z
   .strictObject({
     name: z.string().regex(/^[a-z0-9][a-z0-9-]{2,63}$/),
@@ -32,6 +38,16 @@ const jobSchema = z
       .array(z.string().min(1))
       .min(1)
       .refine((ids) => new Set(ids).size === ids.length),
+    // The short version for Discord, posted once the post has gone out.
+    announce: z
+      .strictObject({
+        text: z.string().refine((text) => {
+          const length = text.trim().length;
+          return length > 0 && length <= ANNOUNCEMENT_MAX_TEXT;
+        }),
+        images: z.array(z.string()).min(1).max(ANNOUNCEMENT_MAX_IMAGES),
+      })
+      .optional(),
   })
   .refine((job) => (job.image === undefined) !== (job.images === undefined))
   // A post needs a text and a story has none; the Worker's other rules are its own.
@@ -71,6 +87,33 @@ async function readImage(folder, file) {
   });
 }
 
+/** Width and height from the header of a PNG, or undefined for anything else. */
+function pngSize(bytes) {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (
+    bytes.length < 24 ||
+    signature.some((byte, index) => bytes[index] !== byte) ||
+    bytes.subarray(12, 16).toString("latin1") !== "IHDR"
+  )
+    return undefined;
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
+/** The images of an announcement: PNGs, landscape or square, as the Worker takes them. */
+async function readAnnouncementImages(folder, files) {
+  const bytes = [];
+  for (const file of files) {
+    const image = await readImage(folder, file);
+    const size = pngSize(image);
+    if (!size || size.width < size.height)
+      throw new Error(
+        `The announcement image "${file}" has to be a PNG, landscape or square.`,
+      );
+    bytes.push(image);
+  }
+  return bytes;
+}
+
 /** The job file and its images. Nothing leaves the machine here. */
 async function readJob(file, cwd) {
   const jobPath = path.resolve(cwd, file);
@@ -87,26 +130,54 @@ async function readJob(file, cwd) {
   }
   if (!parsed.success)
     throw new Error(
-      `The job is not valid: a name, channels, image or images, and a text (a post only), and nothing else, are expected (see: ${parsed.error.issues.map((issue) => issue.path.join(".") || "job").join(", ")}).`,
+      `The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to ${ANNOUNCEMENT_MAX_TEXT} characters and 1 to ${ANNOUNCEMENT_MAX_IMAGES} images), and nothing else, are expected (see: ${parsed.error.issues.map((issue) => issue.path.join(".") || "job").join(", ")}).`,
     );
   const folder = path.dirname(await realpath(jobPath));
   const { image, ...job } = parsed.data;
   const images = job.images ?? [image];
   const bytes = [];
   for (const file of images) bytes.push(await readImage(folder, file));
-  return { ...job, images, bytes };
+  const announce = job.announce && {
+    ...job.announce,
+    bytes: await readAnnouncementImages(folder, job.announce.images),
+  };
+  return { ...job, images, bytes, announce };
+}
+
+/** A request ID in the shape of a UUID, the same for every run with the same seed. */
+function uuidFrom(seed) {
+  const hash = createHash("sha256").update(seed).digest("hex");
+  const variant = "89ab"[Number.parseInt(hash[16], 16) & 3];
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-${variant}${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
 }
 
 /** The request ID of a channel: the same for every run of the same post. */
 function requestId(clientId, { name, type }, channelId) {
-  const hash = createHash("sha256")
-    // The type is hashed for a story only, so the IDs of posts stay what they were.
-    .update(
-      `${clientId}\n${name}\n${channelId}${type === "story" ? "\nstory" : ""}`,
-    )
-    .digest("hex");
-  const variant = "89ab"[Number.parseInt(hash[16], 16) & 3];
-  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-${variant}${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+  // The type is hashed for a story only, so the IDs of posts stay what they were.
+  return uuidFrom(
+    `${clientId}\n${name}\n${channelId}${type === "story" ? "\nstory" : ""}`,
+  );
+}
+
+/** The request ID of the announcement of a post; no channel ID is empty, so it is apart. */
+function announcementRequestId(clientId, { name }) {
+  return uuidFrom(`${clientId}\n${name}\n\nannouncement`);
+}
+
+/** Uploads images one by one; stops at the first that fails and returns its answer. */
+async function uploadAll(context, images) {
+  const mediaIds = [];
+  for (const body of images) {
+    const upload = await ask(context, "/api/buffer/media", {
+      method: "POST",
+      type: "image/png",
+      body,
+    });
+    if (upload.status !== 200 || upload.response?.mediaId === undefined)
+      return { mediaIds, failed: upload };
+    mediaIds.push(upload.response.mediaId);
+  }
+  return { mediaIds };
 }
 
 const parseJson = (text) => {
@@ -164,7 +235,12 @@ async function execute(argv, deps, secrets, document) {
 
   const job = await readJob(file, deps.cwd);
   // These go out as they are: one that holds the token would publish it.
-  const sent = [job.text ?? "", ...job.channels, ...job.images];
+  const sent = [
+    job.text ?? "",
+    ...job.channels,
+    ...job.images,
+    ...(job.announce ? [job.announce.text, ...job.announce.images] : []),
+  ];
   if (sent.some((value) => secrets.some((secret) => value.includes(secret))))
     throw new Error(
       "The text, a channel or an image path of the job contains the service token. Nothing was sent.",
@@ -173,6 +249,11 @@ async function execute(argv, deps, secrets, document) {
     channelId,
     requestId: requestId(token.clientId, job, channelId),
   }));
+  const announce = job.announce && {
+    requestId: announcementRequestId(token.clientId, job),
+    text: job.announce.text,
+    images: job.announce.images,
+  };
   if (command === "preview")
     return {
       name: job.name,
@@ -180,24 +261,21 @@ async function execute(argv, deps, secrets, document) {
       ...(job.text !== undefined && { text: job.text }),
       images: job.images,
       channels,
+      ...(announce && { announce }),
     };
 
-  // Each image once, in order; the first failure stops the run before any post.
-  const mediaIds = [];
-  let upload;
-  for (const body of job.bytes) {
-    upload = await ask(context, "/api/buffer/media", {
-      method: "POST",
-      type: "image/png",
-      body,
-    });
-    if (upload.status !== 200 || upload.response?.mediaId === undefined) break;
-    mediaIds.push(upload.response.mediaId);
-  }
+  // Each image once, in order, those of the announcement too; the first
+  // failure stops the run before any post.
+  const posted = await uploadAll(context, job.bytes);
+  const announced =
+    job.announce && !posted.failed
+      ? await uploadAll(context, job.announce.bytes)
+      : { mediaIds: [] };
+  const upload = posted.failed ?? announced.failed;
   const results = [];
   for (const channel of channels)
     results.push(
-      mediaIds.length < job.bytes.length
+      upload
         ? { ...channel, step: "upload", ...upload }
         : {
             ...channel,
@@ -207,7 +285,7 @@ async function execute(argv, deps, secrets, document) {
               type: "application/json",
               body: JSON.stringify({
                 requestId: channel.requestId,
-                mediaIds,
+                mediaIds: posted.mediaIds,
                 channelId: channel.channelId,
                 text: job.text,
                 ...(job.type === "story" && { type: "story" }),
@@ -216,7 +294,63 @@ async function execute(argv, deps, secrets, document) {
             })),
           },
     );
-  return { name: job.name, results };
+  if (!announce) return { name: job.name, results };
+  return {
+    name: job.name,
+    results,
+    announcement: await registerAnnouncement(
+      context,
+      announce,
+      announced.mediaIds,
+      results,
+      { postText: job.text, postMediaIds: posted.mediaIds },
+    ),
+  };
+}
+
+/**
+ * Registers the announcement for the posts that exist: those created now
+ * (200) and those an earlier run created (409), as long as they carry the
+ * job's text and images. The Worker posts it to Discord once one of them has gone out.
+ */
+async function registerAnnouncement(
+  context,
+  announce,
+  mediaIds,
+  results,
+  { postText, postMediaIds },
+) {
+  const { requestId } = announce;
+  const postRequestIds = results
+    .filter(
+      ({ step, status }) => step === "post" && [200, 409].includes(status),
+    )
+    .map((result) => result.requestId);
+  if (postRequestIds.length === 0)
+    return {
+      requestId,
+      step: "skipped",
+      response: "No post exists, so nothing was announced.",
+    };
+  return {
+    requestId,
+    step: "announce",
+    ...(await ask(context, "/api/buffer/announcements", {
+      method: "POST",
+      type: "application/json",
+      body: JSON.stringify({
+        requestId,
+        text: announce.text,
+        mediaIds,
+        postRequestIds,
+        // A 409 is also what a post edited under the same name gets; with the
+        // text and the images of this run the Worker tells the two apart and
+        // refuses the edited one.
+        postText,
+        postMediaIds,
+      }),
+    })),
+  };
 }
 
 /**
@@ -245,11 +379,12 @@ export async function run(argv, overrides = {}) {
     document.error = cause instanceof Error ? cause.message : String(cause);
   }
   // Only a post the Worker accepted counts; a failed upload leaves no post.
+  const succeeded = ({ step, status }) =>
+    step !== "upload" && status >= 200 && status < 300;
   const ok =
     document.error === undefined &&
-    (document.results ?? []).every(
-      ({ step, status }) => step !== "upload" && status >= 200 && status < 300,
-    );
+    (document.results ?? []).every(succeeded) &&
+    (document.announcement === undefined || succeeded(document.announcement));
   return {
     exitCode: ok ? 0 : 1,
     document: redact({ ok, ...document }, secrets),

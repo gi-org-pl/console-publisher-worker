@@ -435,22 +435,22 @@ describe("the job", () => {
     [
       "an unknown key",
       { mode: "shareNow" },
-      "The job is not valid: a name, channels, image or images, and a text (a post only), and nothing else, are expected (see: job).",
+      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: job).",
     ],
     [
       "a name that is not a slug",
       { name: "Autumn News!" },
-      "The job is not valid: a name, channels, image or images, and a text (a post only), and nothing else, are expected (see: name).",
+      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: name).",
     ],
     [
       "the same channel twice",
       { channels: ["li1", "li1"] },
-      "The job is not valid: a name, channels, image or images, and a text (a post only), and nothing else, are expected (see: channels).",
+      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: channels).",
     ],
     [
       "no channels",
       { channels: [] },
-      "The job is not valid: a name, channels, image or images, and a text (a post only), and nothing else, are expected (see: channels).",
+      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: channels).",
     ],
   ])("refuses %s before any request", async (_name, content, message) => {
     await writeFile(path.join(dir, "post.png"), png());

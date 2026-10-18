@@ -10,12 +10,14 @@ import {
 import {
   type CreatedPost,
   createBufferPost,
+  hasReels,
   hasStories,
   maxImages,
+  videoTypes,
 } from "./buffer";
 import { error, json, readLimited } from "./http";
 import { actorFields, logError, logEvent } from "./log";
-import { imageKey } from "./media";
+import { imageKey, videoKey } from "./media";
 import { minScheduleLeadMs, modeAllowed, postTypeAllowed } from "./policy";
 import type { Channel, Env, Operator } from "./types";
 import { writeAgain } from "./writeGap";
@@ -104,7 +106,14 @@ async function parseInput(request: Request): Promise<PublishInput | Response> {
     );
   } catch (cause) {
     logError("post-input-rejected", cause);
-    return error("Check the post text and settings.", 400);
+    // A rule between fields (a reel without a video, say) is named; anything
+    // else gets the general answer.
+    const rule =
+      cause instanceof z.ZodError &&
+      cause.issues.every((issue) => issue.code === "custom")
+        ? cause.issues[0]?.message
+        : undefined;
+    return error(rule ?? "Check the post text and settings.", 400);
   }
 }
 
@@ -182,7 +191,7 @@ export async function createPost(
   const type = postType(input);
   if (!postTypeAllowed(operator, type)) {
     serviceDenied(operator, input, "Post type not allowed for a service");
-    return error("A service may not create a story.", 403);
+    return error(`A service may not create a ${type}.`, 403);
   }
 
   const channel = channels.find((entry) => entry.id === input.channelId);
@@ -199,6 +208,26 @@ export async function createPost(
 
   if (type === "story" && !hasStories(channel)) {
     return error("This channel has no stories.", 400);
+  }
+
+  if (type === "reel" && !hasReels(channel)) {
+    return error("This channel has no reels.", 400);
+  }
+
+  if (input.videoId) {
+    const types = videoTypes(channel);
+    if (!types.includes(type)) {
+      return error(
+        types.length === 0
+          ? "This channel takes no video."
+          : `On this channel a video goes out as a ${types.join(" or ")}.`,
+        400,
+      );
+    }
+    const video = await env.MEDIA.head(videoKey(input.videoId));
+    if (!video || video.customMetadata?.owner !== operator.subject) {
+      return error("The video expired or belongs to another operator.", 403);
+    }
   }
 
   const mediaIds = postMediaIds(input);

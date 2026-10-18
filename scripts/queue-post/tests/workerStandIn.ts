@@ -67,6 +67,15 @@ export let bufferFetch: ReturnType<typeof vi.fn>;
 /** Everything the script returned, checked for the secret afterwards. */
 let outputs: string[];
 
+/** The start of an MP4: an `ftyp` box, then bytes that stand for the rest of the file. */
+export function mp4(size = 64) {
+  const bytes = new Uint8Array(size);
+  new DataView(bytes.buffer).setUint32(0, 24);
+  bytes.set(new TextEncoder().encode("ftypisom"), 4);
+  for (let index = 24; index < size; index += 1) bytes[index] = index % 251;
+  return bytes;
+}
+
 export function png(size = 24) {
   const bytes = new Uint8Array(size);
   bytes.set([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -181,25 +190,52 @@ export function useWorkerStandIn() {
       CHANNELS_JSON: JSON.stringify([linkedin, instagram]),
       SERVICES_JSON: JSON.stringify([{ clientId, name: "gieniek-bot" }]),
       MEDIA: {
-        head: async (key: string) => objects.get(key) ?? null,
-        get: async (key: string) =>
-          objects.has(key)
-            ? {
-                body: objects.get(key)?.value,
-                etag: objects.get(key)?.etag,
-                uploaded: objects.get(key)?.uploaded,
-                json: async () => JSON.parse(String(objects.get(key)?.value)),
-              }
-            : null,
+        head: async (key: string) => {
+          const object = objects.get(key);
+          return object
+            ? { ...object, size: (object.value as Uint8Array).length }
+            : null;
+        },
+        get: async (
+          key: string,
+          options?: { range?: { offset: number; length: number } },
+        ) => {
+          const object = objects.get(key);
+          if (!object) return null;
+          const { value } = object;
+          const part =
+            value instanceof Uint8Array && options?.range
+              ? value.slice(
+                  options.range.offset,
+                  options.range.offset + options.range.length,
+                )
+              : value;
+          return {
+            body: part,
+            etag: object.etag,
+            uploaded: object.uploaded,
+            size: value instanceof Uint8Array ? value.length : undefined,
+            json: async () => JSON.parse(String(value)),
+            arrayBuffer: async () => new Uint8Array(part as Uint8Array).buffer,
+          };
+        },
+        delete: async (key: string) => {
+          objects.delete(key);
+        },
         put: async (
           key: string,
-          value: unknown,
+          given: unknown,
           options?: {
             onlyIf?: unknown;
             customMetadata?: Record<string, string>;
           },
         ) => {
           if (options?.onlyIf && objects.has(key)) return null;
+          // A video arrives as the request's stream, as in the Worker.
+          const value =
+            given instanceof ReadableStream
+              ? new Uint8Array(await new Response(given).arrayBuffer())
+              : given;
           // R2 derives the etag of an object written in one put from its bytes.
           const etag = createHash("md5")
             .update(value instanceof Uint8Array ? value : String(value))

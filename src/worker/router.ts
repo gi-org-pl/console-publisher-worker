@@ -3,7 +3,7 @@ import { authenticate } from "./auth";
 import { loadServices } from "./config";
 import { error } from "./http";
 import { logError } from "./log";
-import { mediaIdFromPath, serveMedia } from "./media";
+import { mediaFromPath, serveMedia } from "./media";
 import type { Env, Identity, Operator } from "./types";
 
 /** A person is already vetted by the Access policy; a service must also be allowlisted here. */
@@ -48,10 +48,10 @@ export async function routeRequest(
     return error("Invalid service address.", 403);
   }
 
-  // Buffer fetches PNGs without an Access cookie. No other resource is public.
-  const mediaId = mediaIdFromPath(url.pathname);
-  if (mediaId) {
-    return serveMedia(request, env, mediaId);
+  // Buffer fetches PNGs and MP4s without an Access cookie. No other resource is public.
+  const media = mediaFromPath(url.pathname);
+  if (media) {
+    return serveMedia(request, env, media);
   }
 
   const endpoint = endpoints[url.pathname];

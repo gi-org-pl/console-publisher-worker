@@ -392,7 +392,7 @@ describe("the token", () => {
       const { exitCode, document } = await script([command, job]);
       expect(exitCode).toBe(1);
       expect(document.error).toBe(
-        "The text, a channel or an image path of the job contains the service token. Nothing was sent.",
+        "The text, a channel or a file path of the job contains the service token. Nothing was sent.",
       );
     }
     expect(seen).toHaveLength(0);
@@ -435,22 +435,22 @@ describe("the job", () => {
     [
       "an unknown key",
       { mode: "shareNow" },
-      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: job).",
+      "The job is not valid: a name, channels, image or images or a video, a text (a post and a reel), shareToFeed and thumbnailOffset (a video only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: job).",
     ],
     [
       "a name that is not a slug",
       { name: "Autumn News!" },
-      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: name).",
+      "The job is not valid: a name, channels, image or images or a video, a text (a post and a reel), shareToFeed and thumbnailOffset (a video only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: name).",
     ],
     [
       "the same channel twice",
       { channels: ["li1", "li1"] },
-      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: channels).",
+      "The job is not valid: a name, channels, image or images or a video, a text (a post and a reel), shareToFeed and thumbnailOffset (a video only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: channels).",
     ],
     [
       "no channels",
       { channels: [] },
-      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: channels).",
+      "The job is not valid: a name, channels, image or images or a video, a text (a post and a reel), shareToFeed and thumbnailOffset (a video only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: channels).",
     ],
   ])("refuses %s before any request", async (_name, content, message) => {
     await writeFile(path.join(dir, "post.png"), png());
@@ -680,7 +680,7 @@ describe("several images", () => {
     });
     for (const command of ["preview", "queue"])
       expect((await script([command, leaked])).document.error).toBe(
-        "The text, a channel or an image path of the job contains the service token. Nothing was sent.",
+        "The text, a channel or a file path of the job contains the service token. Nothing was sent.",
       );
     expect(seen).toHaveLength(0);
   });
@@ -738,7 +738,7 @@ describe("a story", () => {
   it.each([
     ["a story with a text", { text: "Hi" }],
     ["a post without a text", { type: "post", text: undefined }],
-    ["an unknown type", { type: "reel" }],
+    ["an unknown type", { type: "carousel" }],
   ])("refuses %s as a malformed job", async (_name, change) => {
     const { exitCode, document } = await script(["queue", await story(change)]);
     expect(exitCode).toBe(1);

@@ -8,16 +8,17 @@ Console calls these same-origin routes:
 | --- | --- | --- |
 | `/api/buffer/login` | Operator only | Complete Access login, then return to Console |
 | `/api/buffer/session` | Operator or allowlisted service | Caller identity and approved channels |
-| `/api/buffer/media` | Operator or allowlisted service | Upload one generated PNG to private R2 |
+| `/api/buffer/media` | Operator or allowlisted service | Upload one generated PNG, or one MP4 video, to private R2 |
 | `/api/buffer/posts` | Operator or allowlisted service | Create one Buffer post |
 | `/api/buffer/announcements` | Allowlisted service only | Register a Discord announcement for posts the service created; see [Discord announcements](#discord-announcements) |
 | `/buffer-media/<uuid>.png` | Public read | Let Buffer fetch an uploaded image |
+| `/buffer-media/<uuid>.mp4` | Public read | Let Buffer fetch an uploaded video, also in byte ranges; see [Videos and reels](#videos-and-reels) |
 
 Besides these routes, a Cron Trigger runs the Worker once an hour to post the Discord announcements whose posts have gone out.
 
 An operator is a person signed in through Cloudflare Access. A service is an automation that presents a Cloudflare Access service token; see [Service tokens for automation](#service-tokens-for-automation). Both go through the same Access application - there is no route that bypasses it.
 
-The Buffer key exists only as a Worker secret. The `CHANNELS_JSON` setting is a server-side allowlist. Each post goes to one channel and carries one PNG or several (see [Several images](#several-images)), with immediate publishing, the Buffer queue, or a scheduled time up to 30 days ahead. The image is not published until the operator submits the Console form. A service has a narrower set of options; see [Publishing restrictions](#publishing-restrictions).
+The Buffer key exists only as a Worker secret. The `CHANNELS_JSON` setting is a server-side allowlist. Each post goes to one channel and carries one PNG or several (see [Several images](#several-images)), or one MP4 video (see [Videos and reels](#videos-and-reels)), with immediate publishing, the Buffer queue, or a scheduled time up to 30 days ahead. The image is not published until the operator submits the Console form. A service has a narrower set of options; see [Publishing restrictions](#publishing-restrictions).
 
 ## Buffer setup
 
@@ -39,7 +40,7 @@ The Buffer key exists only as a Worker secret. The `CHANNELS_JSON` setting is a 
    }
    ```
 
-4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram and Facebook feed posts (Buffer requires a post type for both) and Instagram stories (see [Stories](#stories)); Facebook stories, Reels, videos, and other platform-specific metadata are not implemented.
+4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram and Facebook feed posts (Buffer requires a post type for both), Instagram stories (see [Stories](#stories)), Instagram and Facebook reels and LinkedIn video posts (see [Videos and reels](#videos-and-reels)); Facebook stories, video stories, videos in a Facebook feed post and other platform-specific metadata are not implemented.
 
 Buffer Free has limits on channels, queued posts, API calls, and seats; verify the [current plan limits](https://buffer.com/pricing) before expanding use. This design uses one designated operator and one Buffer account/API key. Access identities do not become separate Buffer users.
 
@@ -51,7 +52,7 @@ The `wrangler.jsonc` routes attach this Worker only to `/api/buffer/*` and `/buf
 
 Create one **Self-hosted** Cloudflare Access application for `console.gi.org.pl/api/buffer/*`. Its Allow policy should name the designated operator's exact email. Choose your identity provider or email one-time PIN. Do not add an Everyone allow policy. Copy the application's Audience (AUD) tag into `ACCESS_AUD` and your HTTPS team domain into `ACCESS_TEAM_DOMAIN`. The Worker independently verifies the Access JWT signature, issuer, audience, expiry, and identity.
 
-Do **not** protect `/buffer-media/*` with that Access application: Buffer must fetch PNGs without a browser cookie. The Worker allows only GET/HEAD for UUID PNG paths there. Anyone holding a media URL can read that image, so upload only publication-ready graphics. The private R2 bucket has no public bucket endpoint.
+Do **not** protect `/buffer-media/*` with that Access application: Buffer must fetch PNGs and MP4s without a browser cookie. The Worker allows only GET/HEAD for UUID PNG and MP4 paths there. Anyone holding a media URL can read that image or video, so upload only publication-ready material. The private R2 bucket has no public bucket endpoint.
 
 ## Several images
 
@@ -82,6 +83,75 @@ Do **not** protect `/buffer-media/*` with that Access application: Buffer must f
 - **Services:** a service may create a story, like a post. The modes, the lead time and the channel list apply to it exactly as to a post. The types open to a service are listed in `SERVICE_POST_TYPES`; a type that is not listed there is refused with 403 and a `service-post-denied` log line.
 - **A post and a story of the same material** are two requests with two request IDs.
 - Buffer publishes an Instagram story automatically only for a professional (Business or Creator) account. For another account it falls back to a reminder on a phone with the Buffer app, and the post does not go out by itself.
+
+## Videos and reels
+
+A post can carry one MP4 video in place of its images. Buffer has no upload endpoint: it fetches the video from the Worker's public route when the post goes out, as it does with images ([Hosting Media](https://developers.buffer.com/guides/hosting-media.md)).
+
+### Uploading a video
+
+`POST /api/buffer/media` with `Content-Type: video/mp4` and the file as the body answers `{ "mediaId": "..." }`, like an image.
+
+- **Up to 100 MB** (`MAX_VIDEO_BYTES`), which is also the request body limit of the Workers Free and Pro plans. A reel of the foundation is about 10 MB. A larger file gets 413 and nothing is stored.
+- **The length has to be declared** (`Content-Length`; without it 411). The video is streamed into R2 instead of being read into the Worker's memory, and R2 takes a stream only with a known length. `fetch` in Node and `curl --data-binary` send it by themselves.
+- **An MP4 only:** after the upload the Worker reads the first 16 bytes and checks for an ISO BMFF `ftyp` box. A file without one gets 400 and is deleted before its ID is given out. The codecs, the length, the frame size and the aspect ratio are not checked; the networks check them.
+- **Storage:** `images/<uuid>.mp4` in the same bucket, with the content type `video/mp4` and the owner, as for images. The key sits under `images/` on purpose, so the existing 90-day lifecycle rule deletes videos too; no new rule is needed.
+
+### The public video route
+
+`/buffer-media/<uuid>.mp4` serves the video without Access, GET and HEAD only, with `Content-Type: video/mp4`, `Content-Length` and `Accept-Ranges: bytes`. A request with one range (`Range: bytes=0-1023`, `bytes=1024-` or `bytes=-1024`) gets 206 with `Content-Range`; a range outside the file gets 416 with `Content-Range: bytes */<size>`; several ranges or another unit get the whole file, which HTTP allows. Buffer's documentation does not say whether Buffer or a network fetches a video in ranges; the route takes them in case one does. Every fetch writes a `video-served` log line with the media ID, the method, the `Range` header and the status, so the first real posts show how the video is fetched.
+
+### Video posts
+
+`POST /api/buffer/posts` takes `videoId` (the media ID of the upload) in place of `mediaId` or `mediaIds`; exactly one of the three. A post carries one video, never together with images.
+
+| Field | Meaning |
+| --- | --- |
+| `videoId` | The video. It has to exist and belong to the caller, as images do; otherwise 403. |
+| `type` | `reel` on Instagram and Facebook, `post` (or left out) on LinkedIn. |
+| `text` | Required, as for a post. |
+| `shareToFeed` | Optional, a reel only. Whether an Instagram reel shows in the feed too; left out means it does. Facebook has no such setting, so it is not sent there. |
+| `thumbnailOffset` | Optional, a video only. The frame shown as the thumbnail, in milliseconds from the start, 0 to 900000 (15 minutes, the longest Instagram Reel). Buffer takes it on Instagram only ([VideoMetadataInput](https://developers.buffer.com/types/VideoMetadataInput.md)), so it is left out on other networks. Left out means the network's own choice. |
+
+What Buffer is sent:
+
+| Network | `type` | Asset | Metadata |
+| --- | --- | --- | --- |
+| Instagram | `reel` | `{ video: { url, metadata: { thumbnailOffset } } }` | `{ instagram: { type: "reel", shouldShareToFeed } }` |
+| Facebook | `reel` | `{ video: { url } }` | `{ facebook: { type: "reel" } }` |
+| LinkedIn | `post` | `{ video: { url } }` | none |
+
+Refused with 400 before Buffer is called, with a message that says why:
+
+| Request | Message |
+| --- | --- |
+| A reel on any network other than Instagram and Facebook | "This channel has no reels." |
+| A video post (`type: "post"`) on Instagram or Facebook | "On this channel a video goes out as a reel." |
+| A video on a network that takes none (Threads, Bluesky, Mastodon, X) | "This channel takes no video." The rules of those networks were not looked up. |
+| A reel with images | "A reel takes one video and no images." |
+| A video story | "A story takes an image, not a video." |
+| A video together with images | 'Give one of "mediaId", "mediaIds" or "videoId".' |
+| `shareToFeed` on anything but a reel, `thumbnailOffset` without a video | Says which field |
+| More than one video (any other key, such as `videoIds`) | "Check the post text and settings." |
+
+The limits of the networks, from Buffer's help pages (read on 2026-10-18), are not checked by the Worker: an Instagram Reel is 3 seconds to 15 minutes, up to 300 MB, MP4 or MOV, from a Business or Creator account; a Facebook Reel is for Pages only, 3 to 90 seconds; LinkedIn takes one video per post, up to 1 GB. A video outside them is refused by Buffer or the network, not here.
+
+**Services:** a service may create a reel, like a post and a story (`SERVICE_POST_TYPES`). The modes, the lead time and the channel list apply to it exactly as to a post. **Retries:** the receipt covers the video and its options; a retry with a different `shareToFeed` or `thumbnailOffset` gets 409.
+
+### Storage cost of videos
+
+R2's free tier covers 10 GB-month of storage, and egress is free ([R2 pricing](https://developers.cloudflare.com/r2/pricing/)). At about 10 MB a reel and 90 days in the bucket, even 30 reels a month stay around 1 GB stored. An upload is one Class A operation plus one Class B read of its first bytes; a fetch is one or two Class B operations.
+
+### What is not verified about videos
+
+Everything above is built from Buffer's documentation and covered by tests with stand-ins for R2 and Buffer. Nothing has been sent to Buffer with a video yet, so these are open:
+
+- whether Buffer's free plan publishes Reels through the API;
+- how long Buffer or the network takes to process a video, and what a refused video looks like in Buffer's answer;
+- whether Buffer or the networks fetch a video in ranges;
+- whether streaming the request body into R2 behaves on the real platform as in the tests (it follows Cloudflare's documented use of `put` with `request.body`).
+
+See step 8 in [Verify before live use](#verify-before-live-use).
 
 ## The time Buffer gives a post
 
@@ -218,7 +288,7 @@ A service reads content that other people control - chat messages, issues, web p
 | Restriction | Behaviour | Configuration |
 | --- | --- | --- |
 | Modes | Only `addToQueue` and `customScheduled`. `shareNow` returns 403. | Fixed in code (`SERVICE_MODES`) |
-| Post types | `post` and `story`. A type not listed returns 403. | Fixed in code (`SERVICE_POST_TYPES`) |
+| Post types | `post`, `story` and `reel`. A type not listed returns 403. | Fixed in code (`SERVICE_POST_TYPES`) |
 | Lead time | A `customScheduled` post must be due at least 120 minutes from now, so a person has time to pull it back in Buffer. Earlier times return 400. Operators keep their one-minute minimum. | `minScheduleLeadMinutes` per service, 1 to 43199 |
 | Channels | By default every channel in `CHANNELS_JSON`. With a list, only those channels are returned by `/api/buffer/session` and accepted by `/api/buffer/posts`; others return 403. The list can narrow `CHANNELS_JSON` but never add to it. | `channelIds` per service, optional |
 
@@ -247,7 +317,7 @@ References: [Workers Routes](https://developers.cloudflare.com/workers/configura
 
 ## Queueing a post from the command line
 
-`scripts/queuePost.mjs` queues one post on the channels a job names, as a service identity. It runs on Node 24+ with the repository's dependencies installed, and it does four things: reads the service token, reads the job, uploads each image once, and sends one post (or story) per channel, printing what the Worker answered. The Worker validates every request (text, images, channel, mode, type); the script only keeps the token secret, keeps the images inside the job's folder and reports.
+`scripts/queuePost.mjs` queues one post on the channels a job names, as a service identity. It runs on Node 24+ with the repository's dependencies installed, and it does four things: reads the service token, reads the job, uploads each image (or the video) once, and sends one post (or story, or reel) per channel, printing what the Worker answered. The Worker validates every request (text, images, video, channel, mode, type); the script only keeps the token secret, keeps the files inside the job's folder and reports.
 
 ```sh
 node scripts/queuePost.mjs check
@@ -258,10 +328,10 @@ node scripts/queuePost.mjs queue job.json
 | Command | What it does |
 | --- | --- |
 | `check` | Asks for the session and prints the Worker's answer: the service and the channels, with the channel IDs a job uses. |
-| `preview` | Reads the job and prints what `queue` would send: the type, the text (a post only), the images in order, the request ID of each channel and the announcement with its request ID. Nothing is requested, uploaded or posted. |
-| `queue` | Uploads each image once, in the job's order (those of the announcement too), and creates a post (or a story) in mode `addToQueue` on each channel of the job. Then it registers the announcement, if the job has one, for the posts that exist. |
+| `preview` | Reads the job and prints what `queue` would send: the type, the text (a post and a reel), the images in order or the video with its options, the request ID of each channel and the announcement with its request ID. Nothing is requested, uploaded or posted. |
+| `queue` | Uploads each image once, in the job's order, or the video (the images of the announcement too), and creates a post (or a story, or a reel) in mode `addToQueue` on each channel of the job. Then it registers the announcement, if the job has one, for the posts that exist. |
 
-There is no command for "now" and none for a chosen time. `--credential <name>` may be added to any of them, see [The token](#the-token). The script talks to `https://console.gi.org.pl` only, sends no `Origin` header, follows no redirect and gives up on a request after 60 seconds.
+There is no command for "now" and none for a chosen time. `--credential <name>` may be added to any of them, see [The token](#the-token). The script talks to `https://console.gi.org.pl` only, sends no `Origin` header, follows no redirect and gives up on a request after 60 seconds, on the upload of a video after 5 minutes.
 
 ### The job
 
@@ -300,23 +370,46 @@ A story has a `type`, no text and one image:
 }
 ```
 
+A reel has a `type`, a text and one video in place of the images. Its announcement still takes PNGs:
+
+```json
+{
+  "name": "autumn-reel",
+  "type": "reel",
+  "text": "The caption of the reel.",
+  "video": "reel.mp4",
+  "shareToFeed": true,
+  "thumbnailOffset": 2000,
+  "channels": ["INSTAGRAM_CHANNEL_ID", "FACEBOOK_CHANNEL_ID"],
+  "announce": {
+    "text": "Two or three sentences for Discord, with a link.",
+    "images": ["discord.png"]
+  }
+}
+```
+
+On LinkedIn a video is a post, not a reel: the same video goes there in a job of its own, with another name and `"type": "post"` (or no `type`), and without `shareToFeed`.
+
 | Key | Meaning |
 | --- | --- |
 | `name` | The name of the post: 3 to 64 lower-case letters, digits and hyphens. It decides what counts as the same post, see [A second run](#a-second-run). |
-| `type` | Optional: `post` (the default) or `story`. |
-| `text` | A post needs it, a story has none (a job that does it the other way round is refused as malformed). The text for every channel, as the job has it; the Worker trims leading and trailing whitespace before it publishes, and `preview` shows the text untrimmed. |
+| `type` | Optional: `post` (the default), `story` or `reel`. |
+| `text` | A post and a reel need it, a story has none (a job that does it the other way round is refused as malformed). The text for every channel, as the job has it; the Worker trims leading and trailing whitespace before it publishes, and `preview` shows the text untrimmed. |
 | `images` | The PNGs of the post, in order, as paths inside the folder of the job, the same for every channel. At least one. Every path is checked: an absolute path, a network path and anything that leaves the folder (also through a link) is refused before anything is requested. |
-| `image` | One path, the same as `images` with one entry, so earlier jobs keep working. A job has `images` or `image`, not both. |
+| `image` | One path, the same as `images` with one entry, so earlier jobs keep working. A job has `images`, `image` or `video`, only one of them. |
+| `video` | One MP4, as a path inside the folder of the job, checked like `images`. It is uploaded once and sent with every channel. |
+| `shareToFeed` | Optional, with a `video` only: `false` keeps an Instagram reel out of the feed. See [Video posts](#video-posts). |
+| `thumbnailOffset` | Optional, with a `video` only: the frame of the thumbnail in milliseconds, a whole number. Sent to Instagram only. |
 | `channels` | The channel IDs the Worker knows (`check` prints them). At least one, none twice. |
 | `announce` | Optional. `text`: 1 to 1000 characters after trimming. `images`: one to four PNGs, landscape or square, as paths inside the folder of the job, like `images`. Nothing else. |
 
-A key the script does not know stops the run before anything is requested. The `announce` block is the one place where the script checks the Worker's rules itself - the length of the text, the number of images and that each is a PNG that is not portrait - because the announcement is registered after the posts are queued, and one the Worker refused then would leave the posts without it. Otherwise the script checks nothing: how many images a network takes, that stories are for Instagram channels only (a Facebook channel gets 400 "This channel has no stories."), the size and format of a post image and the channels are the Worker's rules. It sends the request anyway and prints the Worker's 400 or 403 in that channel's entry; the other channels still get theirs, and the exit code is 1. Whether a service may queue stories at all is the Worker's policy too (`SERVICE_POST_TYPES`); where it does not, a story gets 403.
+A key the script does not know stops the run before anything is requested. The `announce` block is the one place where the script checks the Worker's rules itself - the length of the text, the number of images and that each is a PNG that is not portrait - because the announcement is registered after the posts are queued, and one the Worker refused then would leave the posts without it. Otherwise the script checks nothing: how many images a network takes, that stories are for Instagram channels only (a Facebook channel gets 400 "This channel has no stories."), that reels are for Instagram and Facebook only (a LinkedIn channel gets 400 "This channel has no reels."), the size and format of a post image or video and the channels are the Worker's rules. It sends the request anyway and prints the Worker's 400 or 403 in that channel's entry; the other channels still get theirs, and the exit code is 1. Whether a service may queue stories or reels at all is the Worker's policy too (`SERVICE_POST_TYPES`); where it does not, they get 403.
 
 ### A second run
 
-The script keeps no state. The request ID of a channel is derived from the Client ID, the name of the post and the channel, so every run of the same post sends the same IDs, and the Worker decides what happens: it reserves an ID before it calls Buffer and never creates a second post under it. The images are uploaded again and get new media IDs, so the Worker answers a repeat with 409 and creates nothing; that holds for several images and for stories as well. A story gets a request ID of its own, so it never collides with a post of the same name on the same channel. A changed text under the same name ends the same way: a new post needs a new name. After a run in which one channel was refused, run the same job again: the channels that have their post answer 409, the other one is created.
+The script keeps no state. The request ID of a channel is derived from the Client ID, the name of the post and the channel, so every run of the same post sends the same IDs, and the Worker decides what happens: it reserves an ID before it calls Buffer and never creates a second post under it. The images are uploaded again and get new media IDs, so the Worker answers a repeat with 409 and creates nothing; that holds for several images and for stories as well. A story and a reel get request IDs of their own, so they never collide with a post of the same name on the same channel. A video is uploaded again on every run as well, and a repeat gets 409 in the same way. A changed text under the same name ends the same way: a new post needs a new name. After a run in which one channel was refused, run the same job again: the channels that have their post answer 409, the other one is created.
 
-The announcement has a request ID of its own, derived the same way from the name of the post. `queue` registers it for every channel whose post answered 200 or 409, so a second run after a first one that stopped before the announcement registers it for the posts of the first. It sends the job's text and the media IDs of this run's post images with it, and the Worker refuses posts that were queued with another text or other images: a job edited under the same name gets 409 for its posts and for the announcement, and the old posts are not announced with the new copy. Once it is registered, a second run gets 409 for it, as for the posts, and nothing is announced twice. If an upload fails, no post is sent and the announcement is `skipped`.
+The announcement has a request ID of its own, derived the same way from the name of the post. `queue` registers it for every channel whose post answered 200 or 409, so a second run after a first one that stopped before the announcement registers it for the posts of the first. It sends the job's text and the media IDs of this run's post images (or of its video, as `postVideoId`) with it, and the Worker refuses posts that were queued with another text or other images: a job edited under the same name gets 409 for its posts and for the announcement, and the old posts are not announced with the new copy. Once it is registered, a second run gets 409 for it, as for the posts, and nothing is announced twice. If an upload fails, no post is sent and the announcement is `skipped`.
 
 ### The output
 
@@ -334,7 +427,7 @@ One JSON document on stdout:
 }
 ```
 
-Per channel, `status` is the HTTP status of the Worker and `response` what it said. `step` is `post`, or `upload` when an image was not uploaded and so nothing was posted (then `status` and `response` are the upload's). Status `0` means no answer (the connection broke or the 60 seconds passed); for a post that means the post may exist, so look in Buffer before anything else - running the job again cannot create a second one. A job with an announcement adds `announcement: { "requestId", "step", "status", "response" }`: `step` is `announce`, or `skipped` (without `status`) when no post exists to announce. `check` has one result with `step: "session"`; `preview` has `name`, `type`, `text` (a post only), `images` and `channels` instead of `results`; a failure of the script itself is `{ "ok": false, "command": ..., "error": "..." }` with the command as far as the arguments were understood (otherwise `null`). The exit code is 0 only when `ok` is true: no error, and every request answered with a 2xx status, the announcement's too.
+Per channel, `status` is the HTTP status of the Worker and `response` what it said. `step` is `post`, or `upload` when an image or the video was not uploaded and so nothing was posted (then `status` and `response` are the upload's). Status `0` means no answer (the connection broke or the 60 seconds passed); for a post that means the post may exist, so look in Buffer before anything else - running the job again cannot create a second one. A job with an announcement adds `announcement: { "requestId", "step", "status", "response" }`: `step` is `announce`, or `skipped` (without `status`) when no post exists to announce. `check` has one result with `step: "session"`; `preview` has `name`, `type`, `text` (a post and a reel), `images` (or `video` with `shareToFeed` and `thumbnailOffset` when the job sets them) and `channels` instead of `results`; a failure of the script itself is `{ "ok": false, "command": ..., "error": "..." }` with the command as far as the arguments were understood (otherwise `null`). The exit code is 0 only when `ok` is true: no error, and every request answered with a 2xx status, the announcement's too.
 
 ### The token
 
@@ -383,7 +476,7 @@ yarn wrangler login
 yarn wrangler r2 bucket create console-buffer-media
 ```
 
-Set the actual bucket name in `r2_buckets[0].bucket_name`. Keep the bucket private; do not enable `r2.dev` or attach a public R2 custom domain. Add R2 lifecycle deletion rules for `images/`, `receipts/`, `announcements/` and `announcement-posts/` after 90 days. If a post may remain queued longer, increase image retention before relying on it. R2 has a free allowance but overages can be billed; see [R2 pricing](https://developers.cloudflare.com/r2/pricing/).
+Set the actual bucket name in `r2_buckets[0].bucket_name`. Keep the bucket private; do not enable `r2.dev` or attach a public R2 custom domain. Add R2 lifecycle deletion rules for `images/`, `receipts/`, `announcements/` and `announcement-posts/` after 90 days. Videos are stored under `images/` too (`images/<uuid>.mp4`), so the first rule covers them. If a post may remain queued longer, increase image retention before relying on it. R2 has a free allowance but overages can be billed; see [R2 pricing](https://developers.cloudflare.com/r2/pricing/).
 
 Edit `wrangler.jsonc`:
 
@@ -430,5 +523,7 @@ After deployment, set `BUFFER_ENABLED=true` as a GitHub Actions variable in the 
 6. If a service token is configured: call `/api/buffer/session` with its two headers and confirm the response names the service. Then confirm that a second service token which is not in `SERVICES_JSON` gets 403, and that the same call without the headers is stopped by Access. With the service token, confirm that a `shareNow` post returns 403 and that a post scheduled 10 minutes ahead returns 400; neither may appear in Buffer.
 
 7. If the Discord webhook is set: queue one post with an `announce` block on a test channel whose next Buffer slot is near, and watch the Worker's logs (`yarn wrangler tail`) around the next run after the post goes out. Confirm exactly one message in the channel, with its images and no ping, and `discord-announcement-posted` in the log. Queue a second one and delete its post in Buffer before it goes out; the next run should log `announcement-cancelled` and post nothing.
+
+8. Before the first real reel: upload one short reel (9:16, a few seconds, H.264 and AAC) and queue it on a test Instagram channel with its Buffer queue paused, then on a Facebook Page. Open `/buffer-media/<uuid>.mp4` in a private window first: it should play. Then confirm in Buffer that the post shows as a reel with the video, unpause and watch it go out, and watch the Worker's logs (`yarn wrangler tail`): every fetch of the video writes a `video-served` line with its method, its `Range` header and the status, which shows whether Buffer or the network fetches in ranges. Note how long Buffer took and, if it refused the video, what it said, and add both to [What is not verified](#what-is-not-verified-about-videos).
 
 Worker tests use mocked Buffer/R2/Discord and signed Access JWT fixtures; they do not publish real posts. The service token fixture follows Cloudflare's documented payload; it has not been compared with a token issued by the production Access application, so do step 6 before relying on it. `yarn worker:dev` has no authentication bypass. Use an Access-protected staging hostname and test Buffer channel for integrated testing.

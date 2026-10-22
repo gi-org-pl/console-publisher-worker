@@ -1,7 +1,7 @@
 {
   "name": "console-publisher-worker",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "packageManager": "yarn@1.22.22",
   "scripts": {
@@ -15,20 +15,20 @@
     "worker:deploy": "wrangler deploy"
   },
   "dependencies": {
-    "jose": "6.2.12",
-    "zod": "4.1.12"
+    "jose": "6.2.13",
+    "zod": "4.6.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.3.6",
-    "@cloudflare/workers-types": "5.20260928.1",
-    "@types/node": "24.10.1",
-    "@vitest/coverage-v8": "4.0.12",
-    "typescript": "5.9.2",
-    "vitest": "4.0.12",
-    "wrangler": "4.143.0"
+    "@biomejs/biome": "2.3.15",
+    "@cloudflare/workers-types": "5.20261022.1",
+    "@types/node": "24.19.2",
+    "@vitest/coverage-v8": "4.1.12",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12",
+    "wrangler": "4.151.3"
   },
   "engines": {
-    "node": ">=24",
+    "node": ">=24.22.1",
     "yarn": ">=1.22 <2"
   }
 }

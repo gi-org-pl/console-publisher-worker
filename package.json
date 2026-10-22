@@ -1,7 +1,7 @@
 {
   "name": "console-publisher-worker",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "packageManager": "yarn@1.22.22",
   "scripts": {
@@ -28,7 +28,7 @@
     "wrangler": "4.151.3"
   },
   "engines": {
-    "node": ">=24.22.1",
+    "node": ">=24",
     "yarn": ">=1.22 <2"
   }
 }

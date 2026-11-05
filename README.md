@@ -41,7 +41,7 @@ The Buffer key exists only as a Worker secret. The `CHANNELS_JSON` setting is a 
    }
    ```
 
-4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram and Facebook feed posts (Buffer requires a post type for both) and Instagram stories (see [Stories](#stories)); Facebook stories, Reels, videos, and other platform-specific metadata are not implemented.
+4. Put only approved channels in `CHANNELS_JSON`. The Worker supports `facebook`, `instagram`, `linkedin`, `threads`, `bluesky`, `mastodon`, and `twitter` service values. It sends Instagram and Facebook feed posts (Buffer requires a post type for both) Instagram stories (see [Stories](#stories)) and a first comment on Instagram, Facebook and LinkedIn (see [First comment](#first-comment)); Facebook stories, Reels, videos, and other platform-specific metadata are not implemented.
 
 Buffer Free has limits on channels, queued posts, API calls, and seats; verify the [current plan limits](https://buffer.com/pricing) before expanding use. This design uses one designated operator and one Buffer account/API key. Access identities do not become separate Buffer users.
 
@@ -84,6 +84,29 @@ Do **not** protect `/buffer-media/*` with that Access application: Buffer must f
 - **Services:** a service may create a story, like a post. The modes, the lead time and the channel list apply to it exactly as to a post. The types open to a service are listed in `SERVICE_POST_TYPES`; a type that is not listed there is refused with 403 and a `service-post-denied` log line.
 - **A post and a story of the same material** are two requests with two request IDs.
 - Buffer publishes an Instagram story automatically only for a professional (Business or Creator) account. For another account it falls back to a reminder on a phone with the Buffer app, and the post does not go out by itself.
+
+## First comment
+
+`POST /api/buffer/posts` takes an optional `firstComment`: a comment Buffer adds under the post once it is published, for example the link an Instagram caption points to ("link in the comment"). Without it nothing changes: Buffer gets the same request as before and the receipt is the same.
+
+```json
+{
+  "requestId": "...",
+  "mediaIds": ["..."],
+  "channelId": "INSTAGRAM_CHANNEL_ID",
+  "text": "The text of the post. The link is in the comment.",
+  "firstComment": "https://gi.org.pl/...",
+  "mode": "addToQueue"
+}
+```
+
+- **Networks:** Instagram, Facebook and LinkedIn. Buffer takes the comment as `firstComment` in the metadata of the network: `metadata.instagram.firstComment`, `metadata.facebook.firstComment` and `metadata.linkedin.firstComment` on `createPost` (the input types [`InstagramPostMetadataInput`](https://developers.buffer.com/types/InstagramPostMetadataInput.md), [`FacebookPostMetadataInput`](https://developers.buffer.com/types/FacebookPostMetadataInput.md) and [`LinkedInPostMetadataInput`](https://developers.buffer.com/types/LinkedInPostMetadataInput.md)). The metadata of the other networks has no such field, so a first comment for a Threads, Bluesky, Mastodon or X channel is refused with 400 ("This channel takes no first comment.") and Buffer is not called.
+- **Not on a story:** a story with a first comment is refused with 400 ("A story has no first comment.").
+- **Length:** the comment is trimmed like the text and has to keep to Buffer's limit for the network: Instagram 2,200, Facebook 5,000, LinkedIn 1,250 characters, counted as Buffer counts them (UTF-16 code units, so most emoji count as two). A longer one is refused with 400 and names the limit. The numbers are from Buffer's [Character Limits](https://developers.buffer.com/guides/character-limits.md) guide, read on 2026-11-05; they live in `FIRST_COMMENT_LIMITS` in `src/worker/buffer.ts`.
+- **Retries:** the comment is part of the request, like the text. The same request ID with the same comment returns the same post; with another comment, or without one, it returns 409.
+- **Services:** a service may send a first comment, like a text. Its other restrictions hold as before.
+- **One per post:** a post goes to one channel, so each channel gets the comment of its own request. The [queue script](#the-job) can give every channel the same one or each its own.
+- **What Buffer does with it:** the Worker only hands the comment to Buffer, which publishes it after the post. Whether it appears is Buffer's and the network's doing; check the first post with a comment on each network (see step 8 in [Verify before live use](#verify-before-live-use)).
 
 ## The time Buffer gives a post
 
@@ -260,7 +283,7 @@ node scripts/queuePost.mjs queue job.json
 | Command | What it does |
 | --- | --- |
 | `check` | Asks for the session and prints the Worker's answer: the service and the channels, with the channel IDs a job uses. |
-| `preview` | Reads the job and prints what `queue` would send: the type, the text (a post only), the images in order, the request ID of each channel and the announcement with its request ID. Nothing is requested, uploaded or posted. |
+| `preview` | Reads the job and prints what `queue` would send: the type, the text (a post only), the images in order, the request ID and the first comment of each channel and the announcement with its request ID. Nothing is requested, uploaded or posted. |
 | `queue` | Uploads each image once, in the job's order (those of the announcement too), and creates a post (or a story) in mode `addToQueue` on each channel of the job. Then it registers the announcement, if the job has one, for the posts that exist. |
 
 There is no command for "now" and none for a chosen time. `--credential <name>` may be added to any of them, see [The token](#the-token). The script talks to `https://console.gi.org.pl` only, sends no `Origin` header, follows no redirect and gives up on a request after 60 seconds.
@@ -291,6 +314,29 @@ A post can carry an announcement for Discord (see [Discord announcements](#disco
 }
 ```
 
+A post can carry a first comment (see [First comment](#first-comment)), the same on every channel:
+
+```json
+{
+  "name": "autumn-news",
+  "text": "The text of the post. The link is in the comment.",
+  "images": ["first.png"],
+  "channels": ["INSTAGRAM_CHANNEL_ID", "FACEBOOK_CHANNEL_ID"],
+  "firstComment": "https://gi.org.pl/..."
+}
+```
+
+or one per channel, by channel ID; a channel the map leaves out gets none:
+
+```json
+{
+  "firstComment": {
+    "INSTAGRAM_CHANNEL_ID": "https://gi.org.pl/...",
+    "LINKEDIN_CHANNEL_ID": "More on our site: https://gi.org.pl/..."
+  }
+}
+```
+
 A story has a `type`, no text and one image:
 
 ```json
@@ -310,13 +356,14 @@ A story has a `type`, no text and one image:
 | `images` | The PNGs of the post, in order, as paths inside the folder of the job, the same for every channel. At least one. Every path is checked: an absolute path, a network path and anything that leaves the folder (also through a link) is refused before anything is requested. |
 | `image` | One path, the same as `images` with one entry, so earlier jobs keep working. A job has `images` or `image`, not both. |
 | `channels` | The channel IDs the Worker knows (`check` prints them). At least one, none twice. |
+| `firstComment` | Optional, a post only. A text for every channel, or a map from channel ID to text; every key of the map has to be one of `channels`. Sent as it is; the Worker trims it, checks it per network and refuses it for a channel whose network takes none. |
 | `announce` | Optional. `text`: 1 to 1000 characters after trimming. `images`: one to four PNGs, landscape or square, as paths inside the folder of the job, like `images`. Nothing else. |
 
-A key the script does not know stops the run before anything is requested. The `announce` block is the one place where the script checks the Worker's rules itself - the length of the text, the number of images and that each is a PNG that is not portrait - because the announcement is registered after the posts are queued, and one the Worker refused then would leave the posts without it. Otherwise the script checks nothing: how many images a network takes, that stories are for Instagram channels only (a Facebook channel gets 400 "This channel has no stories."), the size and format of a post image and the channels are the Worker's rules. It sends the request anyway and prints the Worker's 400 or 403 in that channel's entry; the other channels still get theirs, and the exit code is 1. Whether a service may queue stories at all is the Worker's policy too (`SERVICE_POST_TYPES`); where it does not, a story gets 403.
+A key the script does not know stops the run before anything is requested. The `announce` block is the one place where the script checks the Worker's rules itself - the length of the text, the number of images and that each is a PNG that is not portrait - because the announcement is registered after the posts are queued, and one the Worker refused then would leave the posts without it. Otherwise the script checks nothing: how many images a network takes, that stories are for Instagram channels only (a Facebook channel gets 400 "This channel has no stories."), which networks take a first comment and how long it may be (a Threads channel gets 400 "This channel takes no first comment."), the size and format of a post image and the channels are the Worker's rules. It sends the request anyway and prints the Worker's 400 or 403 in that channel's entry; the other channels still get theirs, and the exit code is 1. Whether a service may queue stories at all is the Worker's policy too (`SERVICE_POST_TYPES`); where it does not, a story gets 403.
 
 ### A second run
 
-The script keeps no state. The request ID of a channel is derived from the Client ID, the name of the post and the channel, so every run of the same post sends the same IDs, and the Worker decides what happens: it reserves an ID before it calls Buffer and never creates a second post under it. The images are uploaded again and get new media IDs, so the Worker answers a repeat with 409 and creates nothing; that holds for several images and for stories as well. A story gets a request ID of its own, so it never collides with a post of the same name on the same channel. A changed text under the same name ends the same way: a new post needs a new name. After a run in which one channel was refused, run the same job again: the channels that have their post answer 409, the other one is created.
+The script keeps no state. The request ID of a channel is derived from the Client ID, the name of the post and the channel, so every run of the same post sends the same IDs, and the Worker decides what happens: it reserves an ID before it calls Buffer and never creates a second post under it. The images are uploaded again and get new media IDs, so the Worker answers a repeat with 409 and creates nothing; that holds for several images and for stories as well. A story gets a request ID of its own, so it never collides with a post of the same name on the same channel. A changed text or first comment under the same name ends the same way: a new post needs a new name. Adding a first comment does not change the request IDs. After a run in which one channel was refused, run the same job again: the channels that have their post answer 409, the other one is created.
 
 The announcement has a request ID of its own, derived the same way from the name of the post. `queue` registers it for every channel whose post answered 200 or 409, so a second run after a first one that stopped before the announcement registers it for the posts of the first. It sends the job's text and the media IDs of this run's post images with it, and the Worker refuses posts that were queued with another text or other images: a job edited under the same name gets 409 for its posts and for the announcement, and the old posts are not announced with the new copy. Once it is registered, a second run gets 409 for it, as for the posts, and nothing is announced twice. If an upload fails, no post is sent and the announcement is `skipped`.
 
@@ -336,7 +383,7 @@ One JSON document on stdout:
 }
 ```
 
-Per channel, `status` is the HTTP status of the Worker and `response` what it said. `step` is `post`, or `upload` when an image was not uploaded and so nothing was posted (then `status` and `response` are the upload's). Status `0` means no answer (the connection broke or the 60 seconds passed); for a post that means the post may exist, so look in Buffer before anything else - running the job again cannot create a second one. A job with an announcement adds `announcement: { "requestId", "step", "status", "response" }`: `step` is `announce`, or `skipped` (without `status`) when no post exists to announce. `check` has one result with `step: "session"`; `preview` has `name`, `type`, `text` (a post only), `images` and `channels` instead of `results`; a failure of the script itself is `{ "ok": false, "command": ..., "error": "..." }` with the command as far as the arguments were understood (otherwise `null`). The exit code is 0 only when `ok` is true: no error, and every request answered with a 2xx status, the announcement's too.
+Per channel, `status` is the HTTP status of the Worker and `response` what it said. `step` is `post`, or `upload` when an image was not uploaded and so nothing was posted (then `status` and `response` are the upload's). Status `0` means no answer (the connection broke or the 60 seconds passed); for a post that means the post may exist, so look in Buffer before anything else - running the job again cannot create a second one. A job with an announcement adds `announcement: { "requestId", "step", "status", "response" }`: `step` is `announce`, or `skipped` (without `status`) when no post exists to announce. `check` has one result with `step: "session"`; `preview` has `name`, `type`, `text` (a post only), `images` and `channels` (each with its `firstComment`, when it gets one) instead of `results`; a failure of the script itself is `{ "ok": false, "command": ..., "error": "..." }` with the command as far as the arguments were understood (otherwise `null`). The exit code is 0 only when `ok` is true: no error, and every request answered with a 2xx status, the announcement's too.
 
 ### The token
 
@@ -349,7 +396,7 @@ The script takes the service token from the environment: `CF_ACCESS_CLIENT_ID` a
 
 On Windows the entry is read by `scripts/queue-post/readCredential.ps1`, which the script starts itself. On macOS it is read with `/usr/bin/security`: the account first, and the password only when the account is a service token Client ID. The macOS path has not been run on a Mac yet.
 
-Both values of the token go into the two request headers and nowhere else: every text the script prints has them removed first, also when the Worker repeats them, and a job whose text or channel contains them is refused before anything is sent.
+Both values of the token go into the two request headers and nowhere else: every text the script prints has them removed first, also when the Worker repeats them, and a job whose text, first comment, channel or image path contains them is refused before anything is sent.
 
 ### Where the code is
 
@@ -432,5 +479,7 @@ After deployment, set `BUFFER_ENABLED=true` as a GitHub Actions variable in the 
 6. If a service token is configured: call `/api/buffer/session` with its two headers and confirm the response names the service. Then confirm that a second service token which is not in `SERVICES_JSON` gets 403, and that the same call without the headers is stopped by Access. With the service token, confirm that a `shareNow` post returns 403 and that a post scheduled 10 minutes ahead returns 400; neither may appear in Buffer.
 
 7. If the Discord webhook is set: queue one post with an `announce` block on a test channel whose next Buffer slot is near, and watch the Worker's logs (`yarn wrangler tail`) around the next run after the post goes out. Confirm exactly one message in the channel, with its images and no ping, and `discord-announcement-posted` in the log. Queue a second one and delete its post in Buffer before it goes out; the next run should log `announcement-cancelled` and post nothing.
+
+8. If first comments are used: queue one post with a `firstComment` on a test channel of each network (Instagram, Facebook, LinkedIn) and confirm in Buffer that the post shows the comment, then that the comment appears under the published post. The field names come from Buffer's API reference; no post with a first comment has been sent with real credentials.
 
 Worker tests use mocked Buffer/R2/Discord and signed Access JWT fixtures; they do not publish real posts. The service token fixture follows Cloudflare's documented payload; it has not been compared with a token issued by the production Access application, so do step 6 before relying on it. `yarn worker:dev` has no authentication bypass. Use an Access-protected staging hostname and test Buffer channel for integrated testing.

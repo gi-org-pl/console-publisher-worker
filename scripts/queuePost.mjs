@@ -38,6 +38,11 @@ const jobSchema = z
       .array(z.string().min(1))
       .min(1)
       .refine((ids) => new Set(ids).size === ids.length),
+    // A comment Buffer adds under the post: one for every channel, or one per
+    // channel ID, where a channel without an entry gets none.
+    firstComment: z
+      .union([z.string(), z.record(z.string(), z.string())])
+      .optional(),
     // The short version for Discord, posted once the post has gone out.
     announce: z
       .strictObject({
@@ -51,7 +56,26 @@ const jobSchema = z
   })
   .refine((job) => (job.image === undefined) !== (job.images === undefined))
   // A post needs a text and a story has none; the Worker's other rules are its own.
-  .refine((job) => (job.type === "story") === (job.text === undefined));
+  .refine((job) => (job.type === "story") === (job.text === undefined))
+  // A story has no comments, and a comment for a channel the job does not
+  // name would go nowhere.
+  .refine(
+    (job) =>
+      job.firstComment === undefined ||
+      (job.type !== "story" &&
+        (typeof job.firstComment === "string" ||
+          Object.keys(job.firstComment).every((id) =>
+            job.channels.includes(id),
+          ))),
+    { path: ["firstComment"] },
+  );
+
+/** The first comment of one channel of the job, or undefined for none. */
+function firstCommentOf(job, channelId) {
+  return typeof job.firstComment === "string"
+    ? job.firstComment
+    : job.firstComment?.[channelId];
+}
 
 /** @param {string[]} argv */
 function parseArguments(argv) {
@@ -130,7 +154,7 @@ async function readJob(file, cwd) {
   }
   if (!parsed.success)
     throw new Error(
-      `The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to ${ANNOUNCEMENT_MAX_TEXT} characters and 1 to ${ANNOUNCEMENT_MAX_IMAGES} images), and nothing else, are expected (see: ${parsed.error.issues.map((issue) => issue.path.join(".") || "job").join(", ")}).`,
+      `The job is not valid: a name, channels, image or images, a text (a post only), an optional firstComment (a post only, for the job's channels) and an optional announce (a text of 1 to ${ANNOUNCEMENT_MAX_TEXT} characters and 1 to ${ANNOUNCEMENT_MAX_IMAGES} images), and nothing else, are expected (see: ${parsed.error.issues.map((issue) => issue.path.join(".") || "job").join(", ")}).`,
     );
   const folder = path.dirname(await realpath(jobPath));
   const { image, ...job } = parsed.data;
@@ -237,13 +261,14 @@ async function execute(argv, deps, secrets, document) {
   // These go out as they are: one that holds the token would publish it.
   const sent = [
     job.text ?? "",
+    ...job.channels.map((channelId) => firstCommentOf(job, channelId) ?? ""),
     ...job.channels,
     ...job.images,
     ...(job.announce ? [job.announce.text, ...job.announce.images] : []),
   ];
   if (sent.some((value) => secrets.some((secret) => value.includes(secret))))
     throw new Error(
-      "The text, a channel or an image path of the job contains the service token. Nothing was sent.",
+      "The text, a first comment, a channel or an image path of the job contains the service token. Nothing was sent.",
     );
   const channels = job.channels.map((channelId) => ({
     channelId,
@@ -260,7 +285,13 @@ async function execute(argv, deps, secrets, document) {
       type: job.type,
       ...(job.text !== undefined && { text: job.text }),
       images: job.images,
-      channels,
+      channels: channels.map((channel) => {
+        const firstComment = firstCommentOf(job, channel.channelId);
+        return {
+          ...channel,
+          ...(firstComment !== undefined && { firstComment }),
+        };
+      }),
       ...(announce && { announce }),
     };
 
@@ -288,6 +319,7 @@ async function execute(argv, deps, secrets, document) {
                 mediaIds: posted.mediaIds,
                 channelId: channel.channelId,
                 text: job.text,
+                firstComment: firstCommentOf(job, channel.channelId),
                 ...(job.type === "story" && { type: "story" }),
                 mode: "addToQueue",
               }),

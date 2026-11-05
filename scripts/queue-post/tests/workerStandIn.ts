@@ -42,6 +42,12 @@ export const instagram = {
   name: "Foundation Instagram",
   service: "instagram",
 };
+/** A network whose Buffer metadata has no first comment. */
+export const threads = {
+  id: "th1",
+  name: "Foundation Threads",
+  service: "threads",
+};
 export const token = {
   CF_ACCESS_CLIENT_ID: clientId,
   CF_ACCESS_CLIENT_SECRET: clientSecret,
@@ -178,7 +184,7 @@ export function useWorkerStandIn() {
       ACCESS_TEAM_DOMAIN: "https://test.cloudflareaccess.com",
       ACCESS_AUD: "aud",
       BUFFER_API_KEY: "buffer-key",
-      CHANNELS_JSON: JSON.stringify([linkedin, instagram]),
+      CHANNELS_JSON: JSON.stringify([linkedin, instagram, threads]),
       SERVICES_JSON: JSON.stringify([{ clientId, name: "gieniek-bot" }]),
       MEDIA: {
         head: async (key: string) => objects.get(key) ?? null,

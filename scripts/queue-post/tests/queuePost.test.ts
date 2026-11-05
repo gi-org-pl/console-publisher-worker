@@ -386,13 +386,18 @@ describe("the token", () => {
     ["a text holding the Client ID", { text: `see ${clientId}` }],
     ["a channel that is the secret", { channels: ["li1", clientSecret] }],
     ["a channel that holds the Client ID", { channels: [`${clientId}x`] }],
+    ["a first comment holding the secret", { firstComment: clientSecret }],
+    [
+      "the first comment of one channel holding the Client ID",
+      { firstComment: { li1: `see ${clientId}` } },
+    ],
   ])("is never published: %s is refused before any request", async (_name, change) => {
     const job = await writeJob({ channels: ["li1"], ...change });
     for (const command of ["preview", "queue"]) {
       const { exitCode, document } = await script([command, job]);
       expect(exitCode).toBe(1);
       expect(document.error).toBe(
-        "The text, a channel or an image path of the job contains the service token. Nothing was sent.",
+        "The text, a first comment, a channel or an image path of the job contains the service token. Nothing was sent.",
       );
     }
     expect(seen).toHaveLength(0);
@@ -435,22 +440,22 @@ describe("the job", () => {
     [
       "an unknown key",
       { mode: "shareNow" },
-      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: job).",
+      "The job is not valid: a name, channels, image or images, a text (a post only), an optional firstComment (a post only, for the job's channels) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: job).",
     ],
     [
       "a name that is not a slug",
       { name: "Autumn News!" },
-      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: name).",
+      "The job is not valid: a name, channels, image or images, a text (a post only), an optional firstComment (a post only, for the job's channels) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: name).",
     ],
     [
       "the same channel twice",
       { channels: ["li1", "li1"] },
-      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: channels).",
+      "The job is not valid: a name, channels, image or images, a text (a post only), an optional firstComment (a post only, for the job's channels) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: channels).",
     ],
     [
       "no channels",
       { channels: [] },
-      "The job is not valid: a name, channels, image or images, a text (a post only) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: channels).",
+      "The job is not valid: a name, channels, image or images, a text (a post only), an optional firstComment (a post only, for the job's channels) and an optional announce (a text of 1 to 1000 characters and 1 to 4 images), and nothing else, are expected (see: channels).",
     ],
   ])("refuses %s before any request", async (_name, content, message) => {
     await writeFile(path.join(dir, "post.png"), png());
@@ -680,7 +685,7 @@ describe("several images", () => {
     });
     for (const command of ["preview", "queue"])
       expect((await script([command, leaked])).document.error).toBe(
-        "The text, a channel or an image path of the job contains the service token. Nothing was sent.",
+        "The text, a first comment, a channel or an image path of the job contains the service token. Nothing was sent.",
       );
     expect(seen).toHaveLength(0);
   });
@@ -758,5 +763,150 @@ describe("a story", () => {
     expect(post.document.channels[0].requestId).toBe(
       "10cf1b5e-639e-8742-ab6b-5767057b1799",
     );
+  });
+});
+
+describe("a first comment", () => {
+  const firstComment = "Link: https://gi.org.pl";
+  /** What Buffer was asked to create, by channel. */
+  const metadataByChannel = () =>
+    Object.fromEntries(
+      bufferPosts().map((input) => [input.channelId, input.metadata]),
+    );
+
+  it("goes with the post on every channel of the job, and Buffer gets it in each network's metadata", async () => {
+    const watched = watch();
+    const { exitCode } = await script(
+      ["queue", await writeJob({ channels: both, firstComment })],
+      { fetch: watched.fetch },
+    );
+    expect(exitCode).toBe(0);
+    expect(watched.posts.map((sent) => sent.firstComment)).toEqual([
+      firstComment,
+      firstComment,
+    ]);
+    expect(metadataByChannel()).toEqual({
+      li1: { linkedin: { firstComment } },
+      ig1: {
+        instagram: { type: "post", shouldShareToFeed: true, firstComment },
+      },
+    });
+  });
+
+  it("goes only to the channels a map names, and the others get none", async () => {
+    const watched = watch();
+    const { exitCode } = await script(
+      [
+        "queue",
+        await writeJob({ channels: both, firstComment: { ig1: firstComment } }),
+      ],
+      { fetch: watched.fetch },
+    );
+    expect(exitCode).toBe(0);
+    expect(watched.posts[0]).not.toHaveProperty("firstComment");
+    expect(watched.posts[1].firstComment).toBe(firstComment);
+    expect(metadataByChannel()).toEqual({
+      li1: undefined,
+      ig1: {
+        instagram: { type: "post", shouldShareToFeed: true, firstComment },
+      },
+    });
+  });
+
+  it("is shown per channel on preview, and nothing is sent", async () => {
+    const { document } = await script([
+      "preview",
+      await writeJob({
+        channels: both,
+        firstComment: { li1: "LinkedIn link", ig1: "Instagram link" },
+      }),
+    ]);
+    expect(document.channels).toEqual([
+      {
+        channelId: "li1",
+        requestId: expect.any(String),
+        firstComment: "LinkedIn link",
+      },
+      {
+        channelId: "ig1",
+        requestId: expect.any(String),
+        firstComment: "Instagram link",
+      },
+    ]);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("changes nothing on preview or in the request when the job has none", async () => {
+    const watched = watch();
+    const job = await writeJob({ channels: ["ig1"] });
+    const { document } = await script(["preview", job]);
+    expect(document.channels[0]).not.toHaveProperty("firstComment");
+    await script(["queue", job], { fetch: watched.fetch });
+    expect(Object.keys(watched.posts[0])).toEqual([
+      "requestId",
+      "mediaIds",
+      "channelId",
+      "text",
+      "mode",
+    ]);
+  });
+
+  it("keeps the request IDs a job without one has", async () => {
+    const plain = await script(["preview", await writeJob({ channels: both })]);
+    const commented = await script([
+      "preview",
+      await writeJob({ channels: both, firstComment }),
+    ]);
+    expect(
+      commented.document.channels.map((c: Channel) => c.requestId),
+    ).toEqual(plain.document.channels.map((c: Channel) => c.requestId));
+  });
+
+  it("prints the Worker's refusal for a network without first comments and still posts to the others", async () => {
+    const { exitCode, document } = await script([
+      "queue",
+      await writeJob({ channels: ["ig1", "th1"], firstComment }),
+    ]);
+    expect(exitCode).toBe(1);
+    expect(statuses(document.results)).toEqual({ ig1: 200, th1: 400 });
+    expect(document.results[1].response).toEqual({
+      message: "This channel takes no first comment.",
+    });
+    expect(bufferFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a job that puts one on a story, or names a channel it does not post to", async () => {
+    const story = await writeJob({
+      type: "story",
+      text: undefined,
+      channels: ["ig1"],
+      firstComment,
+    });
+    const elsewhere = await writeJob(
+      { channels: ["ig1"], firstComment: { li1: firstComment } },
+      "elsewhere.json",
+    );
+    for (const job of [story, elsewhere]) {
+      const { exitCode, document } = await script(["queue", job]);
+      expect(exitCode).toBe(1);
+      expect(document.error).toMatch(
+        /^The job is not valid: .*\(see: firstComment\)\.$/,
+      );
+    }
+    expect(seen).toHaveLength(0);
+  });
+
+  it.each([
+    ["a number", 42],
+    ["a list", [firstComment]],
+    ["a map with a value that is not a string", { ig1: 42 }],
+  ])("refuses %s as a malformed job", async (_name, value) => {
+    const { exitCode, document } = await script([
+      "queue",
+      await writeJob({ channels: ["ig1"], firstComment: value }),
+    ]);
+    expect(exitCode).toBe(1);
+    expect(document.error).toMatch(/^The job is not valid/);
+    expect(seen).toHaveLength(0);
   });
 });

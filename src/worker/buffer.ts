@@ -37,15 +37,69 @@ export function hasStories(channel: Channel): boolean {
   return STORY_SERVICES.includes(channel.service);
 }
 
-/** Networks where Buffer rejects a post that has no channel-specific type. */
-function channelMetadata(channel: Channel, type: PostType): object | undefined {
+/**
+ * The networks that take a first comment, with the longest one Buffer accepts
+ * there, counted as `string.length` counts (UTF-16 code units). The field is
+ * `firstComment` in `InstagramPostMetadataInput`, `FacebookPostMetadataInput`
+ * and `LinkedInPostMetadataInput`; the limits are from Buffer's "Character
+ * Limits" guide (developers.buffer.com/guides/character-limits.md), read on
+ * 2026-11-05. No other network's metadata input has the field.
+ */
+const FIRST_COMMENT_LIMITS: Partial<Record<Channel["service"], number>> = {
+  instagram: 2200,
+  facebook: 5000,
+  linkedin: 1250,
+};
+
+/**
+ * Why a first comment cannot go with this post, or undefined when it can (or
+ * there is none). A story has no comments; a network without the field in
+ * Buffer's metadata would drop it, so it is refused instead.
+ */
+export function firstCommentError(
+  channel: Channel,
+  type: PostType,
+  firstComment: string | undefined,
+): string | undefined {
+  if (firstComment === undefined) {
+    return undefined;
+  }
+  if (type === "story") {
+    return "A story has no first comment.";
+  }
+  const limit = FIRST_COMMENT_LIMITS[channel.service];
+  if (limit === undefined) {
+    return "This channel takes no first comment.";
+  }
+  if (firstComment.length > limit) {
+    return `The first comment on this channel is at most ${limit} characters.`;
+  }
+  return undefined;
+}
+
+/**
+ * What Buffer gets in `metadata` for this channel. Instagram and Facebook need
+ * a post type there; Instagram, Facebook and LinkedIn take the first comment.
+ * The comment is checked by `firstCommentError` before this.
+ */
+export function channelMetadata(
+  channel: Channel,
+  type: PostType,
+  firstComment?: string,
+): object | undefined {
+  const comment = firstComment === undefined ? {} : { firstComment };
   switch (channel.service) {
     case "instagram":
       // A story is not a feed post, so it is not shared to the feed.
-      return { instagram: { type, shouldShareToFeed: type === "post" } };
+      return {
+        instagram: { type, shouldShareToFeed: type === "post", ...comment },
+      };
     case "facebook":
       // Always a feed post: a story for Facebook is refused before this.
-      return { facebook: { type: "post" } };
+      return { facebook: { type: "post", ...comment } };
+    case "linkedin":
+      // LinkedIn needs no type, so it gets metadata only for a comment.
+      return firstComment === undefined ? undefined : { linkedin: comment };
     default:
       return undefined;
   }
@@ -98,7 +152,11 @@ export async function createBufferPost(
   const assets = postMediaIds(input).map((mediaId) => ({
     image: { url: mediaUrl(env, mediaId) },
   }));
-  const metadata = channelMetadata(channel, postType(input));
+  const metadata = channelMetadata(
+    channel,
+    postType(input),
+    input.firstComment,
+  );
   const response = await bufferRequest(env, mutation, {
     input: {
       channelId: channel.id,

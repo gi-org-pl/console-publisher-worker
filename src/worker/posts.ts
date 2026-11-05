@@ -10,6 +10,7 @@ import {
 import {
   type CreatedPost,
   createBufferPost,
+  firstCommentError,
   hasReels,
   hasStories,
   maxImages,
@@ -22,7 +23,9 @@ import { minScheduleLeadMs, modeAllowed, postTypeAllowed } from "./policy";
 import type { Channel, Env, Operator } from "./types";
 import { writeAgain } from "./writeGap";
 
-const MAX_BODY_BYTES = 24_000;
+// A text and a first comment at their longest, at three UTF-8 bytes a
+// character, and room for the rest of the request.
+const MAX_BODY_BYTES = 40_000;
 const DAY_MS = 86_400_000;
 
 const receiptSchema = z.object({
@@ -212,6 +215,11 @@ export async function createPost(
 
   if (type === "reel" && !hasReels(channel)) {
     return error("This channel has no reels.", 400);
+  }
+
+  const comment = firstCommentError(channel, type, input.firstComment);
+  if (comment) {
+    return error(comment, 400);
   }
 
   if (input.videoId) {

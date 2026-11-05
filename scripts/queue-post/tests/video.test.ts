@@ -143,7 +143,7 @@ describe("a video in a job", () => {
     const { exitCode, document } = await script(["queue", job]);
     expect(exitCode).toBe(1);
     expect(document.error).toBe(
-      "The text, a channel or a file path of the job contains the service token. Nothing was sent.",
+      "The text, a first comment, a channel or a file path of the job contains the service token. Nothing was sent.",
     );
     expect(seen).toHaveLength(0);
   });
@@ -251,6 +251,54 @@ describe("queue with a video", () => {
     const { document } = await script(["queue", job]);
     expect(statuses(document.results)).toEqual([409, 409]);
     expect(bufferPosts()).toHaveLength(2);
+  });
+});
+
+describe("a video with a first comment", () => {
+  const firstComment = "Link: https://gi.org.pl";
+
+  it("goes with an Instagram reel, and the Worker refuses it on a Facebook reel", async () => {
+    const job = await writeReelJob({ firstComment });
+    const { exitCode, document } = await script(["queue", job]);
+    expect(exitCode).toBe(1);
+    expect(document.results).toMatchObject([
+      { channelId: "ig1", step: "post", status: 200 },
+      {
+        channelId: "fb1",
+        step: "post",
+        status: 400,
+        response: { message: "A reel on this channel takes no first comment." },
+      },
+    ]);
+    expect(bufferPosts()).toHaveLength(1);
+    expect(bufferPosts()[0].metadata).toEqual({
+      instagram: { type: "reel", shouldShareToFeed: true, firstComment },
+    });
+  });
+
+  it("goes only to the reel a map names, so the Facebook reel goes out without one", async () => {
+    const job = await writeReelJob({ firstComment: { ig1: firstComment } });
+    const preview = await script(["preview", job]);
+    expect(preview.document.channels).toEqual([
+      { channelId: "ig1", requestId: expect.any(String), firstComment },
+      { channelId: "fb1", requestId: expect.any(String) },
+    ]);
+    const { exitCode } = await script(["queue", job]);
+    expect(exitCode).toBe(0);
+    expect(bufferPosts().map((input) => input.metadata)).toEqual([
+      { instagram: { type: "reel", shouldShareToFeed: true, firstComment } },
+      { facebook: { type: "reel" } },
+    ]);
+  });
+
+  it("goes with a LinkedIn video", async () => {
+    const job = await writeReelJob({
+      type: "post",
+      channels: ["li1"],
+      firstComment,
+    });
+    expect((await script(["queue", job])).exitCode).toBe(0);
+    expect(bufferPosts()[0].metadata).toEqual({ linkedin: { firstComment } });
   });
 });
 

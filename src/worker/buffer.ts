@@ -61,12 +61,67 @@ export function videoTypes(channel: Channel): readonly PostType[] {
   return VIDEO_TYPES[channel.service] ?? [];
 }
 
-/** Networks where Buffer rejects a post that has no channel-specific type. */
-function channelMetadata(
+/**
+ * The networks that take a first comment: the post types Buffer publishes one
+ * with, and the longest one it accepts, counted as `string.length` counts
+ * (UTF-16 code units). The field is `firstComment` in
+ * `InstagramPostMetadataInput`, `FacebookPostMetadataInput` and
+ * `LinkedInPostMetadataInput`; no other network's metadata input has it. The
+ * limits are from Buffer's "Character Limits" guide
+ * (developers.buffer.com/guides/character-limits.md), read on 2026-11-05.
+ * The types: Buffer's help pages, read the same day, give a first comment to
+ * an Instagram post or reel and to a Facebook Page post, and say it is not
+ * supported on a Facebook reel or story. A LinkedIn video is a post.
+ */
+const FIRST_COMMENT: Partial<
+  Record<Channel["service"], { limit: number; types: readonly PostType[] }>
+> = {
+  instagram: { limit: 2200, types: ["post", "reel"] },
+  facebook: { limit: 5000, types: ["post"] },
+  linkedin: { limit: 1250, types: ["post"] },
+};
+
+/**
+ * Why a first comment cannot go with this post, or undefined when it can (or
+ * there is none). A story has no comments; a network or type Buffer publishes
+ * no first comment for would drop it, so it is refused instead.
+ */
+export function firstCommentError(
+  channel: Channel,
+  type: PostType,
+  firstComment: string | undefined,
+): string | undefined {
+  if (firstComment === undefined) {
+    return undefined;
+  }
+  if (type === "story") {
+    return "A story has no first comment.";
+  }
+  const rule = FIRST_COMMENT[channel.service];
+  if (rule === undefined) {
+    return "This channel takes no first comment.";
+  }
+  if (!rule.types.includes(type)) {
+    return `A ${type} on this channel takes no first comment.`;
+  }
+  if (firstComment.length > rule.limit) {
+    return `The first comment on this channel is at most ${rule.limit} characters.`;
+  }
+  return undefined;
+}
+
+/**
+ * What Buffer gets in `metadata` for this channel. Instagram and Facebook need
+ * a post type there; Instagram, Facebook and LinkedIn take the first comment.
+ * The comment is checked by `firstCommentError` before this.
+ */
+export function channelMetadata(
   channel: Channel,
   input: PublishInput,
 ): object | undefined {
   const type = postType(input);
+  const { firstComment } = input;
+  const comment = firstComment === undefined ? {} : { firstComment };
   switch (channel.service) {
     case "instagram":
       // A story is not a feed post, so it is not shared to the feed; a reel
@@ -76,11 +131,17 @@ function channelMetadata(
           type,
           shouldShareToFeed:
             type === "post" || (type === "reel" && input.shareToFeed !== false),
+          ...comment,
         },
       };
     case "facebook":
       // A feed post or a reel: a story for Facebook is refused before this.
-      return { facebook: { type: type === "reel" ? "reel" : "post" } };
+      return {
+        facebook: { type: type === "reel" ? "reel" : "post", ...comment },
+      };
+    case "linkedin":
+      // LinkedIn needs no type, so it gets metadata only for a comment.
+      return firstComment === undefined ? undefined : { linkedin: comment };
     default:
       return undefined;
   }

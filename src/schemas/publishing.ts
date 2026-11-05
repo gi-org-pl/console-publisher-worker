@@ -19,6 +19,11 @@ export const MAX_IMAGES_PER_POST = 20;
 /** The longest text of a post. */
 export const MAX_POST_TEXT = 5000;
 /**
+ * The longest first comment of a post: the limit of the network that takes the
+ * longest. The limit of each network is checked by the Worker.
+ */
+export const MAX_FIRST_COMMENT = 5000;
+/**
  * What a post can be published as. A story is there for a day and shows no
  * caption; a reel is a short video with a caption.
  */
@@ -84,6 +89,12 @@ export const publishInputSchema = z
     channelId: z.string().min(1),
     /** Left out for a story, which shows no caption; required for a post and a reel. */
     text: z.string().trim().min(1).max(MAX_POST_TEXT).optional(),
+    /**
+     * A comment Buffer adds under the post once it is published, for example
+     * the link a caption points to. Which networks take one, and how long it
+     * may be, is checked by the Worker against the channel.
+     */
+    firstComment: z.string().trim().min(1).max(MAX_FIRST_COMMENT).optional(),
     /** Left out means "post". */
     type: z.enum(POST_TYPES).optional(),
     /** Whether an Instagram reel shows in the feed too. Left out means it does. */

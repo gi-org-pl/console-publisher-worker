@@ -1580,6 +1580,68 @@ describe("Given a video", () => {
       expect(objects.has(`receipts/${requestId}`)).toBe(false);
     });
 
+    describe("with a first comment", () => {
+      const firstComment = "Link: https://gi.org.pl";
+
+      it("sends it with an Instagram reel, next to the feed setting", async () => {
+        expect(
+          (await send({ ...reel, shareToFeed: false, firstComment })).status,
+        ).toBe(200);
+        expect(sent().assets).toEqual([videoAsset]);
+        expect(sent().metadata).toEqual({
+          instagram: { type: "reel", shouldShareToFeed: false, firstComment },
+        });
+      });
+
+      it("sends it with a LinkedIn video", async () => {
+        onChannel("linkedin");
+        const { type: _reel, ...videoPost } = reel;
+        expect((await send({ ...videoPost, firstComment })).status).toBe(200);
+        expect(sent().assets).toEqual([videoAsset]);
+        expect(sent().metadata).toEqual({ linkedin: { firstComment } });
+      });
+
+      it("refuses it on a Facebook reel with 400 before anything is sent to Buffer", async () => {
+        onChannel("facebook");
+        const response = await send({ ...reel, firstComment });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({
+          message: "A reel on this channel takes no first comment.",
+        });
+        expect(post).not.toHaveBeenCalled();
+        expect(objects.has(`receipts/${requestId}`)).toBe(false);
+      });
+
+      it("keeps Buffer's limit for the network on a reel", async () => {
+        const response = await send({
+          ...reel,
+          firstComment: "x".repeat(2201),
+        });
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({
+          message:
+            "The first comment on this channel is at most 2200 characters.",
+        });
+        expect(post).not.toHaveBeenCalled();
+      });
+
+      it("returns the same reel for a retry and 409 when the comment changes", async () => {
+        expect((await send({ ...reel, firstComment })).status).toBe(200);
+        expect((await send({ ...reel, firstComment })).status).toBe(200);
+        expect((await send(reel)).status).toBe(409);
+        expect(post).toHaveBeenCalledTimes(1);
+      });
+
+      it("is open to a service on a reel", async () => {
+        authenticate.mockResolvedValue({ kind: "service", clientId });
+        own(serviceOwner);
+        expect((await sendAsService({ ...reel, firstComment })).status).toBe(
+          200,
+        );
+        expect(sent().metadata.instagram.firstComment).toBe(firstComment);
+      });
+    });
+
     it("returns the same reel for a retry and 409 when an option changes", async () => {
       expect((await send(reel)).status).toBe(200);
       expect(await (await send(reel)).json()).toEqual({ postId: "post1" });
@@ -1619,5 +1681,138 @@ describe("Given a video", () => {
         expect(post).not.toHaveBeenCalled();
       });
     });
+  });
+});
+
+describe("Given a first comment", () => {
+  const firstComment = "Link: https://gi.org.pl";
+  const sent = (call = 0) =>
+    JSON.parse(post.mock.calls[call][1].body).variables.input;
+  const onChannel = (service: string) => {
+    env.CHANNELS_JSON = JSON.stringify([
+      { id: "allowed", name: "Channel", service },
+    ]);
+  };
+
+  it("passes it to Buffer in the Instagram metadata", async () => {
+    expect(await (await send({ ...input, firstComment })).json()).toEqual({
+      postId: "post1",
+    });
+    expect(sent().metadata).toEqual({
+      instagram: { type: "post", shouldShareToFeed: true, firstComment },
+    });
+    expect(sent().text).toBe("Hello");
+  });
+
+  it.each([
+    ["facebook", { facebook: { type: "post", firstComment } }],
+    ["linkedin", { linkedin: { firstComment } }],
+  ])("passes it to Buffer in the %s metadata", async (service, metadata) => {
+    onChannel(service);
+    expect((await send({ ...input, firstComment })).status).toBe(200);
+    expect(sent().metadata).toEqual(metadata);
+  });
+
+  it("sends Buffer the trimmed comment", async () => {
+    expect(
+      (await send({ ...input, firstComment: `  ${firstComment}\n` })).status,
+    ).toBe(200);
+    expect(sent().metadata.instagram.firstComment).toBe(firstComment);
+  });
+
+  it.each([
+    "threads",
+    "bluesky",
+    "mastodon",
+    "twitter",
+  ])("refuses it for %s with 400 before anything is sent to Buffer", async (service) => {
+    onChannel(service);
+    const response = await send({ ...input, firstComment });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      message: "This channel takes no first comment.",
+    });
+    expect(post).not.toHaveBeenCalled();
+    expect(objects.has(`receipts/${requestId}`)).toBe(false);
+  });
+
+  it("refuses it on a story with 400 before anything is sent to Buffer", async () => {
+    const { text: _caption, ...withoutText } = input;
+    const response = await send({
+      ...withoutText,
+      type: "story",
+      firstComment,
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      message: "A story has no first comment.",
+    });
+    expect(post).not.toHaveBeenCalled();
+    expect(objects.has(`receipts/${requestId}`)).toBe(false);
+  });
+
+  it("refuses one longer than the network takes, and takes the longest it does", async () => {
+    onChannel("linkedin");
+    const response = await send({ ...input, firstComment: "x".repeat(1251) });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      message: "The first comment on this channel is at most 1250 characters.",
+    });
+    expect(post).not.toHaveBeenCalled();
+    expect(
+      (await send({ ...input, firstComment: "x".repeat(1250) })).status,
+    ).toBe(200);
+  });
+
+  it("takes a text and a first comment at their longest in multi-byte characters", async () => {
+    onChannel("facebook");
+    const response = await send({
+      ...input,
+      text: "\u20ac".repeat(5000),
+      firstComment: "\u20ac".repeat(5000),
+    });
+    expect(response.status).toBe(200);
+  });
+
+  it("refuses an empty comment as invalid input", async () => {
+    expect((await send({ ...input, firstComment: " " })).status).toBe(400);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("sends the same request to Buffer, and keeps the same receipt, when it is left out", async () => {
+    expect((await send()).status).toBe(200);
+    expect(sent().metadata).toEqual({
+      instagram: { type: "post", shouldShareToFeed: true },
+    });
+    const stored = JSON.parse(
+      String(objects.get(`receipts/${requestId}`)?.value),
+    );
+    // The fingerprint of a receipt written before first comments existed, so
+    // a retry of an older request still gets its post back.
+    expect(stored.fingerprint).toBe(
+      JSON.stringify({
+        requestId,
+        mediaId,
+        channelId: "allowed",
+        text: "Hello",
+        mode: "addToQueue",
+      }),
+    );
+  });
+
+  it("returns the same post for a retry and 409 when the comment changes", async () => {
+    expect((await send({ ...input, firstComment })).status).toBe(200);
+    expect(await (await send({ ...input, firstComment })).json()).toEqual({
+      postId: "post1",
+    });
+    expect((await send({ ...input, firstComment: "Other" })).status).toBe(409);
+    expect((await send(input)).status).toBe(409);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("is open to a service as to an operator", async () => {
+    asService();
+    expect((await sendAsService({ ...input, firstComment })).status).toBe(200);
+    expect(sent().metadata.instagram.firstComment).toBe(firstComment);
   });
 });

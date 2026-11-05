@@ -7,7 +7,7 @@ import {
   postMediaIds,
   postType,
 } from "../schemas/publishing";
-import { mediaUrl } from "./media";
+import { mediaUrl, videoUrl } from "./media";
 import type { Channel, Env } from "./types";
 
 const BUFFER_API = "https://api.buffer.com";
@@ -37,24 +37,54 @@ export function hasStories(channel: Channel): boolean {
   return STORY_SERVICES.includes(channel.service);
 }
 
+/** The networks a reel can be sent to; Buffer takes the type in their metadata. */
+const REEL_SERVICES: readonly Channel["service"][] = ["instagram", "facebook"];
+
+export function hasReels(channel: Channel): boolean {
+  return REEL_SERVICES.includes(channel.service);
+}
+
 /**
- * The networks that take a first comment, with the longest one Buffer accepts
- * there, counted as `string.length` counts (UTF-16 code units). The field is
- * `firstComment` in `InstagramPostMetadataInput`, `FacebookPostMetadataInput`
- * and `LinkedInPostMetadataInput`; the limits are from Buffer's "Character
- * Limits" guide (developers.buffer.com/guides/character-limits.md), read on
- * 2026-11-05. No other network's metadata input has the field.
+ * The types a video can go out as, per network. On Instagram and Facebook a
+ * video is a reel: Instagram shows every video as one, and a video in a
+ * Facebook feed post was not asked for and not tried. LinkedIn has no post
+ * types, so a video there is a post. A network that is not listed takes no
+ * video until its rules are looked up.
  */
-const FIRST_COMMENT_LIMITS: Partial<Record<Channel["service"], number>> = {
-  instagram: 2200,
-  facebook: 5000,
-  linkedin: 1250,
+const VIDEO_TYPES: Partial<Record<Channel["service"], readonly PostType[]>> = {
+  instagram: ["reel"],
+  facebook: ["reel"],
+  linkedin: ["post"],
+};
+
+export function videoTypes(channel: Channel): readonly PostType[] {
+  return VIDEO_TYPES[channel.service] ?? [];
+}
+
+/**
+ * The networks that take a first comment: the post types Buffer publishes one
+ * with, and the longest one it accepts, counted as `string.length` counts
+ * (UTF-16 code units). The field is `firstComment` in
+ * `InstagramPostMetadataInput`, `FacebookPostMetadataInput` and
+ * `LinkedInPostMetadataInput`; no other network's metadata input has it. The
+ * limits are from Buffer's "Character Limits" guide
+ * (developers.buffer.com/guides/character-limits.md), read on 2026-11-05.
+ * The types: Buffer's help pages, read the same day, give a first comment to
+ * an Instagram post or reel and to a Facebook Page post, and say it is not
+ * supported on a Facebook reel or story. A LinkedIn video is a post.
+ */
+const FIRST_COMMENT: Partial<
+  Record<Channel["service"], { limit: number; types: readonly PostType[] }>
+> = {
+  instagram: { limit: 2200, types: ["post", "reel"] },
+  facebook: { limit: 5000, types: ["post"] },
+  linkedin: { limit: 1250, types: ["post"] },
 };
 
 /**
  * Why a first comment cannot go with this post, or undefined when it can (or
- * there is none). A story has no comments; a network without the field in
- * Buffer's metadata would drop it, so it is refused instead.
+ * there is none). A story has no comments; a network or type Buffer publishes
+ * no first comment for would drop it, so it is refused instead.
  */
 export function firstCommentError(
   channel: Channel,
@@ -67,12 +97,15 @@ export function firstCommentError(
   if (type === "story") {
     return "A story has no first comment.";
   }
-  const limit = FIRST_COMMENT_LIMITS[channel.service];
-  if (limit === undefined) {
+  const rule = FIRST_COMMENT[channel.service];
+  if (rule === undefined) {
     return "This channel takes no first comment.";
   }
-  if (firstComment.length > limit) {
-    return `The first comment on this channel is at most ${limit} characters.`;
+  if (!rule.types.includes(type)) {
+    return `A ${type} on this channel takes no first comment.`;
+  }
+  if (firstComment.length > rule.limit) {
+    return `The first comment on this channel is at most ${rule.limit} characters.`;
   }
   return undefined;
 }
@@ -84,25 +117,53 @@ export function firstCommentError(
  */
 export function channelMetadata(
   channel: Channel,
-  type: PostType,
-  firstComment?: string,
+  input: PublishInput,
 ): object | undefined {
+  const type = postType(input);
+  const { firstComment } = input;
   const comment = firstComment === undefined ? {} : { firstComment };
   switch (channel.service) {
     case "instagram":
-      // A story is not a feed post, so it is not shared to the feed.
+      // A story is not a feed post, so it is not shared to the feed; a reel
+      // is, unless the post says otherwise.
       return {
-        instagram: { type, shouldShareToFeed: type === "post", ...comment },
+        instagram: {
+          type,
+          shouldShareToFeed:
+            type === "post" || (type === "reel" && input.shareToFeed !== false),
+          ...comment,
+        },
       };
     case "facebook":
-      // Always a feed post: a story for Facebook is refused before this.
-      return { facebook: { type: "post", ...comment } };
+      // A feed post or a reel: a story for Facebook is refused before this.
+      return {
+        facebook: { type: type === "reel" ? "reel" : "post", ...comment },
+      };
     case "linkedin":
       // LinkedIn needs no type, so it gets metadata only for a comment.
       return firstComment === undefined ? undefined : { linkedin: comment };
     default:
       return undefined;
   }
+}
+
+/**
+ * The media of a post as Buffer takes it: one asset per image, in the order
+ * given (Buffer shows them in that order), or the one video. Buffer takes a
+ * thumbnail offset on Instagram only (and TikTok and Pinterest, which the
+ * Worker does not serve), so it is left out elsewhere.
+ */
+function postAssets(env: Env, input: PublishInput, channel: Channel) {
+  if (input.videoId) {
+    const offset =
+      input.thumbnailOffset !== undefined && channel.service === "instagram"
+        ? { metadata: { thumbnailOffset: input.thumbnailOffset } }
+        : {};
+    return [{ video: { url: videoUrl(env, input.videoId), ...offset } }];
+  }
+  return postMediaIds(input).map((mediaId) => ({
+    image: { url: mediaUrl(env, mediaId) },
+  }));
 }
 
 /**
@@ -148,15 +209,8 @@ export async function createBufferPost(
   input: PublishInput,
   channel: Channel,
 ): Promise<CreatedPost> {
-  // One entry per image, in the order given: Buffer shows them in that order.
-  const assets = postMediaIds(input).map((mediaId) => ({
-    image: { url: mediaUrl(env, mediaId) },
-  }));
-  const metadata = channelMetadata(
-    channel,
-    postType(input),
-    input.firstComment,
-  );
+  const assets = postAssets(env, input, channel);
+  const metadata = channelMetadata(channel, input);
   const response = await bufferRequest(env, mutation, {
     input: {
       channelId: channel.id,

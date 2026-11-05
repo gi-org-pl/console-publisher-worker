@@ -1,6 +1,24 @@
 import { describe, expect, it } from "vitest";
+import type { PostType, PublishInput } from "../schemas/publishing";
 import { channelMetadata, firstCommentError } from "./buffer";
 import type { Channel } from "./types";
+
+/** The metadata of a post of this type, with this first comment, if any. */
+const metadataOf = (
+  channel: Channel,
+  type: PostType,
+  firstComment?: string,
+  more: Partial<PublishInput> = {},
+) =>
+  channelMetadata(channel, {
+    requestId: "fa7ec4cf-3fb8-475a-85eb-7781ca67f5df",
+    channelId: channel.id,
+    text: "Hello",
+    mode: "addToQueue",
+    type,
+    ...(firstComment === undefined ? {} : { firstComment }),
+    ...more,
+  });
 
 const on = (service: Channel["service"]): Channel => ({
   id: "c1",
@@ -10,7 +28,7 @@ const on = (service: Channel["service"]): Channel => ({
 
 describe("the metadata Buffer gets for a channel", () => {
   it("carries the first comment for Instagram, next to the post type", () => {
-    expect(channelMetadata(on("instagram"), "post", "Link: x.org")).toEqual({
+    expect(metadataOf(on("instagram"), "post", "Link: x.org")).toEqual({
       instagram: {
         type: "post",
         shouldShareToFeed: true,
@@ -20,25 +38,25 @@ describe("the metadata Buffer gets for a channel", () => {
   });
 
   it("carries the first comment for Facebook, next to the post type", () => {
-    expect(channelMetadata(on("facebook"), "post", "Link: x.org")).toEqual({
+    expect(metadataOf(on("facebook"), "post", "Link: x.org")).toEqual({
       facebook: { type: "post", firstComment: "Link: x.org" },
     });
   });
 
   it("carries the first comment for LinkedIn, which needs no type", () => {
-    expect(channelMetadata(on("linkedin"), "post", "Link: x.org")).toEqual({
+    expect(metadataOf(on("linkedin"), "post", "Link: x.org")).toEqual({
       linkedin: { firstComment: "Link: x.org" },
     });
   });
 
   it("stays what it was without a first comment", () => {
-    expect(channelMetadata(on("instagram"), "post")).toEqual({
+    expect(metadataOf(on("instagram"), "post")).toEqual({
       instagram: { type: "post", shouldShareToFeed: true },
     });
-    expect(channelMetadata(on("instagram"), "story")).toEqual({
+    expect(metadataOf(on("instagram"), "story")).toEqual({
       instagram: { type: "story", shouldShareToFeed: false },
     });
-    expect(channelMetadata(on("facebook"), "post")).toEqual({
+    expect(metadataOf(on("facebook"), "post")).toEqual({
       facebook: { type: "post" },
     });
     for (const service of [
@@ -48,8 +66,39 @@ describe("the metadata Buffer gets for a channel", () => {
       "mastodon",
       "twitter",
     ] as const) {
-      expect(channelMetadata(on(service), "post")).toBeUndefined();
+      expect(metadataOf(on(service), "post")).toBeUndefined();
     }
+  });
+
+  it("carries the first comment for an Instagram reel, next to its feed setting", () => {
+    expect(
+      metadataOf(on("instagram"), "reel", "Link: x.org", {
+        shareToFeed: false,
+      }),
+    ).toEqual({
+      instagram: {
+        type: "reel",
+        shouldShareToFeed: false,
+        firstComment: "Link: x.org",
+      },
+    });
+  });
+
+  it("carries the first comment for a LinkedIn video, which is a post", () => {
+    expect(
+      metadataOf(on("linkedin"), "post", "Link: x.org", {
+        videoId: "44444444-4444-4444-8444-444444444444",
+      }),
+    ).toEqual({ linkedin: { firstComment: "Link: x.org" } });
+  });
+
+  it("keeps the metadata of a reel as it was without a first comment", () => {
+    expect(metadataOf(on("instagram"), "reel")).toEqual({
+      instagram: { type: "reel", shouldShareToFeed: true },
+    });
+    expect(metadataOf(on("facebook"), "reel")).toEqual({
+      facebook: { type: "reel" },
+    });
   });
 });
 
@@ -77,6 +126,16 @@ describe("whether a first comment can go with a post", () => {
   ] as const)("refuses one on %s, which has no such field in Buffer", (service) => {
     expect(firstCommentError(on(service), "post", "Link")).toBe(
       "This channel takes no first comment.",
+    );
+  });
+
+  it("takes one on an Instagram reel", () => {
+    expect(firstCommentError(on("instagram"), "reel", "Link")).toBeUndefined();
+  });
+
+  it("refuses one on a Facebook reel, which Buffer publishes without it", () => {
+    expect(firstCommentError(on("facebook"), "reel", "Link")).toBe(
+      "A reel on this channel takes no first comment.",
     );
   });
 

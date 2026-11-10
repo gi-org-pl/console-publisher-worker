@@ -8,11 +8,16 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.x
           cache: yarn
-      - run: corepack enable
-      - run: yarn install --frozen-lockfile
-      - run: yarn typecheck && yarn lint && yarn test:coverage && yarn worker:check
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+      - name: Typecheck, lint, test and check the worker
+        run: yarn typecheck && yarn lint && yarn test:coverage && yarn worker:check

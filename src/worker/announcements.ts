@@ -10,7 +10,7 @@ import {
 } from "../schemas/publishing";
 import { error, json, readLimited } from "./http";
 import { actorFields, logError, logEvent } from "./log";
-import { imageKey, landscapeOrSquare } from "./media";
+import { imageKey, landscapeOrSquare, videoKey } from "./media";
 import { readReceipt } from "./posts";
 import type { Env, Operator } from "./types";
 
@@ -143,6 +143,7 @@ function receiptRequest(postFingerprint: string): {
   text?: unknown;
   mediaId?: unknown;
   mediaIds?: unknown;
+  videoId?: unknown;
 } {
   try {
     return JSON.parse(postFingerprint) ?? {};
@@ -152,20 +153,21 @@ function receiptRequest(postFingerprint: string): {
 }
 
 /**
- * The R2 etags of the caller's images, in order: R2 derives the etag of an
- * object written in one put from its bytes, so equal etags mean equal images.
- * Undefined when one is missing or someone else's.
+ * The R2 etags of the caller's images (or video), in order: R2 derives the
+ * etag of an object written in one put from its bytes, so equal etags mean
+ * equal files. Undefined when one is missing or someone else's.
  */
-async function imageTags(
+async function mediaTags(
   env: Env,
   operator: Operator,
   mediaIds: unknown,
+  key: (mediaId: string) => string = imageKey,
 ): Promise<string[] | undefined> {
   if (!Array.isArray(mediaIds) || mediaIds.length === 0) {
     return undefined;
   }
   const images = await Promise.all(
-    mediaIds.map((mediaId) => env.MEDIA.head(imageKey(String(mediaId)))),
+    mediaIds.map((mediaId) => env.MEDIA.head(key(String(mediaId)))),
   );
   return images.every(
     (image) => image && image.customMetadata?.owner === operator.subject,
@@ -353,9 +355,15 @@ export async function registerAnnouncement(
     return error("Only posts this service created can be announced.", 403);
   }
   const expectedImages =
-    input.postMediaIds && (await imageTags(env, operator, input.postMediaIds));
+    input.postMediaIds && (await mediaTags(env, operator, input.postMediaIds));
   if (input.postMediaIds && !expectedImages) {
     return error("The image expired or belongs to another operator.", 403);
+  }
+  const expectedVideo =
+    input.postVideoId &&
+    (await mediaTags(env, operator, [input.postVideoId], videoKey));
+  if (input.postVideoId && !expectedVideo) {
+    return error("The video expired or belongs to another operator.", 403);
   }
   const posts: AnnouncedPost[] = [];
   for (const [index, receipt] of receipts.entries()) {
@@ -373,7 +381,7 @@ export async function registerAnnouncement(
       );
     }
     if (expectedImages) {
-      const tags = await imageTags(
+      const tags = await mediaTags(
         env,
         operator,
         queued.mediaIds ?? (queued.mediaId ? [queued.mediaId] : undefined),
@@ -381,6 +389,20 @@ export async function registerAnnouncement(
       if (tags?.join() !== expectedImages.join()) {
         return error(
           "One of the posts was queued with other images. A changed post needs a new name.",
+          409,
+        );
+      }
+    }
+    if (expectedVideo) {
+      const tags = await mediaTags(
+        env,
+        operator,
+        queued.videoId ? [queued.videoId] : undefined,
+        videoKey,
+      );
+      if (tags?.join() !== expectedVideo.join()) {
+        return error(
+          "One of the posts was queued with another video. A changed post needs a new name.",
           409,
         );
       }
